@@ -2,6 +2,7 @@ package com.lumen.app.ui.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lumen.app.data.db.FtsQuerySanitizer
 import com.lumen.app.data.db.dao.LineDao
 import com.lumen.app.domain.model.SearchResult
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -43,7 +44,7 @@ class SearchViewModel @Inject constructor(
             return
         }
         _isSearching.value = true
-        val sanitized = sanitizeFtsQuery(trimmed)
+        val sanitized = FtsQuerySanitizer.sanitize(trimmed)
         val rows = lineDao.search(sanitized)
         _results.value = rows.map { row ->
             SearchResult(
@@ -59,11 +60,5 @@ class SearchViewModel @Inject constructor(
             )
         }
         _isSearching.value = false
-    }
-
-    private fun sanitizeFtsQuery(input: String): String {
-        // Strip chars that break FTS4 MATCH syntax, then wrap in quotes for phrase search
-        val cleaned = input.replace('"', ' ').replace('*', ' ').trim()
-        return "\"$cleaned\""
     }
 }

@@ -87,6 +87,8 @@ android-pdf-viewer = { group = "com.github.mhiew", name = "android-pdf-viewer", 
 
 # Testing
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
