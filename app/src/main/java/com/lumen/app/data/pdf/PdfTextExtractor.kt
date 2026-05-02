@@ -24,14 +24,17 @@ class PdfTextExtractor @Inject constructor(
         uri: Uri,
         onPage: suspend (pageIndex: Int, text: String) -> Unit,
     ): Outcome {
+        val inputStream = context.contentResolver.openInputStream(uri)
+            ?: return Outcome.Error
         return try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
+            inputStream.use { stream ->
                 PDDocument.load(stream).use { doc ->
                     val stripper = PDFTextStripper()
                     repeat(doc.numberOfPages) { i ->
                         stripper.startPage = i + 1
                         stripper.endPage = i + 1
-                        onPage(i, stripper.getText(doc))
+                        val text = try { stripper.getText(doc) } catch (_: Exception) { "" }
+                        onPage(i, text)
                     }
                 }
             }

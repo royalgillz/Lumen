@@ -1,6 +1,5 @@
 package com.lumen.app.data.db.dao
 
-import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -21,7 +20,8 @@ interface LineDao {
 
     // Caller must sanitize :query before calling — bare `"` or `*` will throw a SQLiteException.
     @Query("""
-        SELECT l.id AS lineId, l.pageId, l.lineNumber, l.text AS snippet, l.bboxJson,
+        SELECT l.id AS lineId, l.pageId, l.lineNumber,
+               snippet('', '', '...', 0, 18) AS snippet,
                p.pageNumber, p.isOcr,
                d.id AS docId, d.uri, d.filename
         FROM lines_fts
@@ -41,7 +41,6 @@ data class SearchResultRow(
     val pageId: Long,
     val lineNumber: Int,
     val snippet: String,
-    @ColumnInfo(name = "bboxJson") val bboxJson: String?,
     val pageNumber: Int,
     val isOcr: Boolean,
     val docId: Long,

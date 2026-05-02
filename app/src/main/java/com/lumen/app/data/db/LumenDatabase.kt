@@ -17,8 +17,8 @@ import com.lumen.app.data.db.entity.PageEntity
         LineContentEntity::class,
         LineEntity::class,
     ],
-    version = 1,
-    exportSchema = false
+    version = 2,
+    exportSchema = true
 )
 abstract class LumenDatabase : RoomDatabase() {
     abstract fun documentDao(): DocumentDao

@@ -2,22 +2,24 @@ package com.lumen.app.ui.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.lumen.app.data.db.FtsQuerySanitizer
-import com.lumen.app.data.db.dao.LineDao
 import com.lumen.app.domain.model.SearchResult
+import com.lumen.app.domain.usecase.SearchUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onEach
 import javax.inject.Inject
 
 @HiltViewModel
 class SearchViewModel @Inject constructor(
-    private val lineDao: LineDao,
+    private val searchUseCase: SearchUseCase,
 ) : ViewModel() {
 
     val query = MutableStateFlow("")
@@ -29,36 +31,23 @@ class SearchViewModel @Inject constructor(
     val isSearching: StateFlow<Boolean> = _isSearching
 
     init {
-        @OptIn(FlowPreview::class)
+        @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
         query
             .debounce(200)
             .distinctUntilChanged()
-            .onEach { q -> runSearch(q) }
+            .mapLatest { q ->
+                _isSearching.value = true
+                try {
+                    searchUseCase(q)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    emptyList()
+                }
+            }
+            .onEach { results ->
+                _results.value = results
+                _isSearching.value = false
+            }
             .launchIn(viewModelScope)
-    }
-
-    private suspend fun runSearch(raw: String) {
-        val trimmed = raw.trim()
-        if (trimmed.length < 2) {
-            _results.value = emptyList()
-            return
-        }
-        _isSearching.value = true
-        val sanitized = FtsQuerySanitizer.sanitize(trimmed)
-        val rows = lineDao.search(sanitized)
-        _results.value = rows.map { row ->
-            SearchResult(
-                lineId = row.lineId,
-                docId = row.docId,
-                uri = row.uri,
-                filename = row.filename,
-                pageNumber = row.pageNumber,
-                lineNumber = row.lineNumber,
-                snippet = row.snippet,
-                bboxJson = row.bboxJson,
-                isOcr = row.isOcr,
-            )
-        }
-        _isSearching.value = false
     }
 }

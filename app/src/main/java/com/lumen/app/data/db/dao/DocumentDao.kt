@@ -35,6 +35,10 @@ interface DocumentDao {
     @Query("DELETE FROM documents WHERE id = :id")
     suspend fun delete(id: Long)
 
+    // instr(uri, treeUri) = 1 is a safe "starts with" check that avoids LIKE wildcard collisions
+    @Query("DELETE FROM documents WHERE instr(uri, :treeUri) = 1")
+    suspend fun deleteByTreeUri(treeUri: String)
+
     @Query("SELECT COUNT(*) FROM documents WHERE status = 'indexed'")
     suspend fun countIndexed(): Int
 

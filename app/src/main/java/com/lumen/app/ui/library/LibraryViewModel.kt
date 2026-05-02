@@ -6,9 +6,10 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import com.lumen.app.data.db.dao.DocumentDao
 import com.lumen.app.data.db.entity.DocumentEntity
-import com.lumen.app.data.fs.SafRepository
+import com.lumen.app.data.repository.LibraryRepository
+import com.lumen.app.domain.usecase.AddFolderUseCase
+import com.lumen.app.domain.usecase.RemoveFolderUseCase
 import com.lumen.app.worker.IndexWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
@@ -20,44 +21,34 @@ import javax.inject.Inject
 
 @HiltViewModel
 class LibraryViewModel @Inject constructor(
-    private val safRepository: SafRepository,
-    private val documentDao: DocumentDao,
+    private val libraryRepository: LibraryRepository,
+    private val addFolderUseCase: AddFolderUseCase,
+    private val removeFolderUseCase: RemoveFolderUseCase,
     private val workManager: WorkManager,
 ) : ViewModel() {
 
-    val documents: StateFlow<List<DocumentEntity>> = documentDao
-        .observeAll()
+    val documents: StateFlow<List<DocumentEntity>> = libraryRepository.documents
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val folders: StateFlow<Set<Uri>> = safRepository.folderUris
+    val folders: StateFlow<Set<Uri>> = libraryRepository.folders
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
-    /** True while any IndexWorker is running — drives the indexing banner. */
     val isIndexing: StateFlow<Boolean> = workManager
         .getWorkInfosByTagFlow("index")
         .map { infos -> infos.any { it.state == WorkInfo.State.RUNNING } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     fun addFolder(treeUri: Uri) {
-        viewModelScope.launch {
-            safRepository.addFolder(treeUri)
-            workManager.enqueueUniqueWork(
-                "index_${treeUri}",
-                ExistingWorkPolicy.REPLACE,
-                IndexWorker.buildRequest(treeUri),
-            )
-        }
+        viewModelScope.launch { addFolderUseCase(treeUri) }
     }
 
     fun removeFolder(treeUri: Uri) {
-        viewModelScope.launch {
-            safRepository.removeFolder(treeUri)
-        }
+        viewModelScope.launch { removeFolderUseCase(treeUri) }
     }
 
     fun reindexFolder(treeUri: Uri) {
         workManager.enqueueUniqueWork(
-            "index_${treeUri}",
+            "index_$treeUri",
             ExistingWorkPolicy.REPLACE,
             IndexWorker.buildRequest(treeUri),
         )

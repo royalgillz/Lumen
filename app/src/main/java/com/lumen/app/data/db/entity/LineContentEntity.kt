@@ -20,5 +20,4 @@ data class LineContentEntity(
     val pageId: Long,
     val lineNumber: Int,
     val text: String,
-    val bboxJson: String? = null
 )

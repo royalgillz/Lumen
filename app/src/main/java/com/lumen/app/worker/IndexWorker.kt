@@ -21,6 +21,8 @@ import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.db.entity.LineContentEntity
 import com.lumen.app.data.db.entity.PageEntity
+import androidx.room.withTransaction
+import com.lumen.app.data.db.LumenDatabase
 import com.lumen.app.data.fs.PdfFile
 import com.lumen.app.data.fs.PdfScanner
 import com.lumen.app.data.ocr.MlKitOcrEngine
@@ -32,6 +34,7 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 @HiltWorker
 class IndexWorker @AssistedInject constructor(
@@ -43,6 +46,7 @@ class IndexWorker @AssistedInject constructor(
     private val lineExtractor: LineExtractor,
     private val mlKitOcrEngine: MlKitOcrEngine,
     private val tesseractOcrEngine: TesseractOcrEngine,
+    private val database: LumenDatabase,
     private val documentDao: DocumentDao,
     private val pageDao: PageDao,
     private val lineDao: LineDao,
@@ -66,7 +70,16 @@ class IndexWorker @AssistedInject constructor(
         pdfs.forEachIndexed { index, pdf ->
             setProgress(workDataOf(KEY_PROGRESS to index, KEY_TOTAL to pdfs.size))
             setForeground(buildForegroundInfo("${index + 1} / ${pdfs.size}: ${pdf.filename}"))
-            indexPdf(pdf)
+            val completed = try {
+                withTimeoutOrNull(10 * 60 * 1000L) { indexPdf(pdf) } != null
+            } catch (_: Exception) {
+                false
+            }
+            if (!completed) {
+                documentDao.getByUri(pdf.uri.toString())?.id?.let { docId ->
+                    documentDao.updateStatus(docId, DocumentEntity.STATUS_ERROR)
+                }
+            }
         }
 
         Result.success()
@@ -93,24 +106,46 @@ class IndexWorker @AssistedInject constructor(
                 addedAt = existing?.addedAt ?: System.currentTimeMillis(),
             )
         )
-
-        // Foreign key CASCADE on PageEntity deletes all lines too
         pageDao.deleteByDocument(docId)
 
-        var pageCount = 0
+        // Pass 1: extract text from every page via PdfBox
+        data class PageData(val index: Int, val text: String, val needsOcr: Boolean)
+        val pages = mutableListOf<PageData>()
         val outcome = pdfTextExtractor.extractAll(pdf.uri) { pageIndex, rawText ->
             val needsOcr = rawText.trim().length < MIN_CHARS_TEXT_PDF
-            val finalText = if (needsOcr) ocrPage(pdf.uri, pageIndex) ?: rawText else rawText
-            val usedOcr = needsOcr && finalText.trim().isNotEmpty()
+            pages.add(PageData(pageIndex, rawText, needsOcr))
+        }
 
-            val pageId = pageDao.insert(
-                PageEntity(docId = docId, pageNumber = pageIndex, isOcr = usedOcr)
-            )
-            val lines = lineExtractor.extract(finalText).mapIndexed { i, lineText ->
-                LineContentEntity(pageId = pageId, lineNumber = i, text = lineText)
+        // Pass 2: OCR — open PdfRenderer once for all pages that need it
+        val ocrTexts = mutableMapOf<Int, String>()
+        val ocrPageIndices = pages.filter { it.needsOcr }.map { it.index }
+        if (ocrPageIndices.isNotEmpty()) {
+            pdfPageRenderer.renderPagesInSession(pdf.uri, ocrPageIndices) { pageIndex, bitmap ->
+                val mlText = mlKitOcrEngine.recognizeText(bitmap)
+                ocrTexts[pageIndex] = if (mlText.length >= MIN_OCR_CHARS) {
+                    mlText
+                } else {
+                    val tessText = tesseractOcrEngine.recognizeText(bitmap)
+                    if (tessText.length > mlText.length) tessText else mlText
+                }
             }
-            if (lines.isNotEmpty()) lineDao.insertAll(lines)
-            pageCount++
+        }
+
+        // Pass 3: write all pages + lines in a single transaction
+        database.withTransaction {
+            pages.forEach { page ->
+                val finalText = if (page.needsOcr) ocrTexts[page.index] ?: page.text else page.text
+                val usedOcr = page.needsOcr && ocrTexts[page.index]?.isNotEmpty() == true
+                val wordCount = finalText.trim()
+                    .split("\\s+".toRegex()).count { it.isNotEmpty() }
+                val pageId = pageDao.insert(
+                    PageEntity(docId = docId, pageNumber = page.index, isOcr = usedOcr, wordCount = wordCount)
+                )
+                val lines = lineExtractor.extract(finalText).mapIndexed { i, lineText ->
+                    LineContentEntity(pageId = pageId, lineNumber = i, text = lineText)
+                }
+                if (lines.isNotEmpty()) lineDao.insertAll(lines)
+            }
         }
 
         when (outcome) {
@@ -118,29 +153,13 @@ class IndexWorker @AssistedInject constructor(
                 documentDao.markIndexed(
                     id = docId,
                     status = DocumentEntity.STATUS_INDEXED,
-                    pageCount = pageCount,
+                    pageCount = pages.size,
                     indexedAt = System.currentTimeMillis(),
                 )
             PdfTextExtractor.Outcome.Encrypted ->
                 documentDao.updateStatus(docId, DocumentEntity.STATUS_ENCRYPTED)
             PdfTextExtractor.Outcome.Error ->
                 documentDao.updateStatus(docId, DocumentEntity.STATUS_ERROR)
-        }
-    }
-
-    /** Renders [pageIndex] and runs ML Kit → Tesseract fallback. Recycles bitmap after use. */
-    private suspend fun ocrPage(uri: Uri, pageIndex: Int): String? {
-        val bitmap = pdfPageRenderer.renderPage(uri, pageIndex) ?: return null
-        return try {
-            val mlKitText = mlKitOcrEngine.recognizeText(bitmap)
-            if (mlKitText.length >= MIN_OCR_CHARS) {
-                mlKitText
-            } else {
-                val tessText = tesseractOcrEngine.recognizeText(bitmap)
-                if (tessText.length > mlKitText.length) tessText else mlKitText
-            }
-        } finally {
-            bitmap.recycle()
         }
     }
 

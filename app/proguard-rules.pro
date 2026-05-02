@@ -1,21 +1,45 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Keep source file + line numbers for readable crash stack traces
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ── Room ──────────────────────────────────────────────────────────────────────
+# Entities are accessed via reflection by Room's generated code
+-keep class com.lumen.app.data.db.entity.** { *; }
+-keep class com.lumen.app.data.db.dao.SearchResultRow { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ── Hilt ──────────────────────────────────────────────────────────────────────
+-keep class dagger.hilt.** { *; }
+-keep class javax.inject.** { *; }
+-keepclasseswithmembernames class * {
+    @dagger.hilt.* <fields>;
+    @dagger.hilt.* <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# ── WorkManager ───────────────────────────────────────────────────────────────
+-keep class * extends androidx.work.CoroutineWorker { *; }
+-keep class * extends androidx.work.ListenableWorker { *; }
+-keep class com.lumen.app.worker.** { *; }
+
+# ── PdfBox-Android ────────────────────────────────────────────────────────────
+-keep class com.tom_roush.pdfbox.** { *; }
+-dontwarn com.tom_roush.pdfbox.**
+
+# ── ML Kit ────────────────────────────────────────────────────────────────────
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_text_common.** { *; }
+-dontwarn com.google.mlkit.**
+
+# ── Tesseract4Android ─────────────────────────────────────────────────────────
+-keep class com.googlecode.tesseract.android.** { *; }
+-dontwarn com.googlecode.tesseract.**
+
+# ── AndroidPdfViewer (barteksc / PDFium) ──────────────────────────────────────
+-keep class com.github.barteksc.pdfviewer.** { *; }
+-dontwarn com.github.barteksc.**
+
+# ── Kotlin coroutines ─────────────────────────────────────────────────────────
+-keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
+-keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+-keepclassmembernames class kotlinx.** {
+    volatile <fields>;
+}

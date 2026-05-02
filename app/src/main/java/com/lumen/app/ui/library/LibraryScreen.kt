@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -132,6 +133,7 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
                         FolderRow(
                             uri = uri,
                             onRemove = { viewModel.removeFolder(uri) },
+                            onReindex = { viewModel.reindexFolder(uri) },
                         )
                     }
                     item { Spacer(Modifier.height(8.dp)) }
@@ -215,7 +217,7 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun FolderRow(uri: Uri, onRemove: () -> Unit) {
+private fun FolderRow(uri: Uri, onRemove: () -> Unit, onReindex: () -> Unit) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -242,6 +244,13 @@ private fun FolderRow(uri: Uri, onRemove: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            IconButton(onClick = onReindex) {
+                Icon(
+                    Icons.Default.Refresh,
+                    contentDescription = "Re-index folder",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
             IconButton(onClick = onRemove) {
                 Icon(
                     Icons.Default.Delete,

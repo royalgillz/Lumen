@@ -6,32 +6,37 @@ import org.junit.Test
 class FtsQuerySanitizerTest {
 
     @Test
-    fun normalInput_wrappedInQuotes() {
-        assertEquals("\"hello world\"", FtsQuerySanitizer.sanitize("hello world"))
+    fun multiWord_andWithPrefixWildcard() {
+        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("hello world"))
     }
 
     @Test
     fun doubleQuotes_stripped() {
-        assertEquals("\"hello world\"", FtsQuerySanitizer.sanitize("hello \"world\""))
+        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("hello \"world\""))
     }
 
     @Test
     fun asterisks_stripped() {
-        assertEquals("\"hello world\"", FtsQuerySanitizer.sanitize("hello* world*"))
+        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("hello* world*"))
     }
 
     @Test
     fun leadingTrailingSpaces_trimmed() {
-        assertEquals("\"hello\"", FtsQuerySanitizer.sanitize("  hello  "))
+        assertEquals("hello*", FtsQuerySanitizer.sanitize("  hello  "))
     }
 
     @Test
     fun mixedSpecialChars_allStripped() {
-        assertEquals("\"hello world\"", FtsQuerySanitizer.sanitize("\"hello*\" world*"))
+        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("\"hello*\" world*"))
     }
 
     @Test
-    fun singleWord_wrappedInQuotes() {
-        assertEquals("\"kotlin\"", FtsQuerySanitizer.sanitize("kotlin"))
+    fun singleWord_prefixWildcard() {
+        assertEquals("kotlin*", FtsQuerySanitizer.sanitize("kotlin"))
+    }
+
+    @Test
+    fun threeWords_andChained() {
+        assertEquals("a* AND b* AND c*", FtsQuerySanitizer.sanitize("a b c"))
     }
 }

@@ -17,11 +17,16 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ksp {
+            arg("room.schemaLocation", "$projectDir/schemas")
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -83,12 +88,8 @@ dependencies {
     // PDF text extraction — Apache-2.0 license
     implementation(libs.pdfbox.android)
 
-    // ML Kit OCR — bundled, fully offline
+    // ML Kit OCR — bundled, fully offline (Latin/script recognizer only)
     implementation(libs.mlkit.text.recognition)
-    implementation(libs.mlkit.text.recognition.chinese)
-    implementation(libs.mlkit.text.recognition.japanese)
-    implementation(libs.mlkit.text.recognition.korean)
-    implementation(libs.mlkit.text.recognition.devanagari)
 
     // OCR fallback for Arabic, Cyrillic (traineddata downloaded to device on demand)
     implementation(libs.tesseract4android)

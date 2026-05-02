@@ -6,6 +6,7 @@ import com.googlecode.tesseract.android.TessBaseAPI
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -36,17 +37,20 @@ class TesseractOcrEngine @Inject constructor(
         }
     }
 
-    override suspend fun recognizeText(bitmap: Bitmap): String = withContext(Dispatchers.IO) {
-        if (!trainedDataFile.exists()) return@withContext ""
-        val api = TessBaseAPI()
-        try {
-            if (!api.init(tessDataParent.absolutePath, "eng")) return@withContext ""
-            api.setImage(bitmap)
-            api.getUTF8Text() ?: ""
-        } catch (e: Exception) {
-            ""
-        } finally {
-            api.recycle()
-        }
-    }
+    override suspend fun recognizeText(bitmap: Bitmap): String =
+        withTimeoutOrNull(30_000L) {
+            withContext(Dispatchers.IO) {
+                if (!trainedDataFile.exists()) return@withContext ""
+                val api = TessBaseAPI()
+                try {
+                    if (!api.init(tessDataParent.absolutePath, "eng")) return@withContext ""
+                    api.setImage(bitmap)
+                    api.getUTF8Text() ?: ""
+                } catch (e: Exception) {
+                    ""
+                } finally {
+                    api.recycle()
+                }
+            }
+        } ?: ""
 }

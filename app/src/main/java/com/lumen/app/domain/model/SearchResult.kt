@@ -9,6 +9,5 @@ data class SearchResult(
     val pageNumber: Int,
     val lineNumber: Int,
     val snippet: String,
-    val bboxJson: String?,
     val isOcr: Boolean
 )
