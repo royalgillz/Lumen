@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -20,6 +21,15 @@ class SafRepository @Inject constructor(
 ) {
     companion object {
         private val KEY_FOLDER_URIS = stringSetPreferencesKey("saf_folder_uris")
+        private val KEY_ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
+    }
+
+    val hasCompletedOnboarding: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[KEY_ONBOARDING_DONE] == true
+    }
+
+    suspend fun markOnboardingDone() {
+        dataStore.edit { it[KEY_ONBOARDING_DONE] = true }
     }
 
     val folderUris: Flow<Set<Uri>> = dataStore.data.map { prefs ->

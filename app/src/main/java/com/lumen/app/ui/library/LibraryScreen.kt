@@ -45,6 +45,7 @@ import com.lumen.app.ui.theme.AmberAccent
 fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
     val documents by viewModel.documents.collectAsState()
     val folders by viewModel.folders.collectAsState()
+    val isIndexing by viewModel.isIndexing.collectAsState()
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -94,6 +95,28 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 }
+            }
+        }
+
+        if (isIndexing) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                LinearProgressIndicator(
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                )
+                Text(
+                    "Indexing…",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
             }
         }
 

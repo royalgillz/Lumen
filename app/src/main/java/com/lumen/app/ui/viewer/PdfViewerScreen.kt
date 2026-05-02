@@ -2,6 +2,7 @@ package com.lumen.app.ui.viewer
 
 import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,9 +16,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -31,6 +34,10 @@ fun PdfViewerScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val parsedUri = remember(uri) { runCatching { Uri.parse(uri) }.getOrNull() }
+    val stream = remember(parsedUri) {
+        parsedUri?.let { context.contentResolver.openInputStream(it) }
+    }
 
     Column(
         modifier = Modifier
@@ -60,11 +67,10 @@ fun PdfViewerScreen(
         }
         HorizontalDivider()
 
-        AndroidView(
-            factory = { ctx ->
-                PDFView(ctx, null).also { pdfView ->
-                    val stream = ctx.contentResolver.openInputStream(Uri.parse(uri))
-                    if (stream != null) {
+        if (stream != null) {
+            AndroidView(
+                factory = { ctx ->
+                    PDFView(ctx, null).also { pdfView ->
                         pdfView.fromStream(stream)
                             .defaultPage(pageNumber)
                             .enableSwipe(true)
@@ -72,9 +78,19 @@ fun PdfViewerScreen(
                             .enableDoubletap(true)
                             .load()
                     }
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "Unable to open this PDF.\nThe file may have been moved or deleted.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(32.dp),
+                )
+            }
+        }
     }
 }

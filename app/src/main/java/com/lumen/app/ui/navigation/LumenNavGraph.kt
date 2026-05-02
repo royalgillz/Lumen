@@ -24,8 +24,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.lumen.app.ui.library.LibraryScreen
 import com.lumen.app.ui.onboarding.OnboardingScreen
+import com.lumen.app.ui.onboarding.OnboardingViewModel
 import com.lumen.app.ui.search.SearchScreen
 import com.lumen.app.ui.settings.SettingsScreen
 import com.lumen.app.ui.viewer.PdfViewerScreen
@@ -93,7 +95,9 @@ fun LumenNavGraph(
             modifier = Modifier.padding(innerPadding),
         ) {
             composable(Screen.Onboarding.route) {
+                val onboardingVm: OnboardingViewModel = hiltViewModel()
                 OnboardingScreen(onFinished = {
+                    onboardingVm.markDone()
                     navController.navigate(Screen.Search.route) {
                         popUpTo(Screen.Onboarding.route) { inclusive = true }
                     }
