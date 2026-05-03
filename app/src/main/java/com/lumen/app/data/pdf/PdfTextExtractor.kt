@@ -17,7 +17,7 @@ class PdfTextExtractor @Inject constructor(
 
     /**
      * Opens the document once and calls [onPage] for each page (0-indexed).
-     * Uses startPage/endPage so only one page is loaded into memory at a time —
+     * Uses startPage/endPage so only one page is loaded into memory at a time,
      * never calls getText() on the whole document.
      */
     suspend fun extractAll(

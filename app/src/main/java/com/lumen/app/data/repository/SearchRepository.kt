@@ -19,7 +19,7 @@ class SearchRepository @Inject constructor(
         val rows = lineDao.search(sanitizedQuery)
 
         val filtered = rows.filter { row ->
-            (filters.folderUris.isEmpty() || row.treeUri in filters.folderUris) &&
+            (filters.folderIds.isEmpty() || treeUriToFolderId(row.treeUri) in filters.folderIds) &&
                 (!filters.ocrOnly || row.isOcr)
         }
 
@@ -58,5 +58,11 @@ class SearchRepository @Inject constructor(
         } catch (_: Exception) {
             ""
         }
+    }
+
+    private fun treeUriToFolderId(treeUri: String): String {
+        if (treeUri.isBlank()) return ""
+        return runCatching { DocumentsContract.getTreeDocumentId(Uri.parse(treeUri)) }
+            .getOrDefault(treeUri)
     }
 }

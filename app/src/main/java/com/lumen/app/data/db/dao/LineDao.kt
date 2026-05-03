@@ -18,7 +18,7 @@ interface LineDao {
     @Query("DELETE FROM lines WHERE pageId = :pageId")
     suspend fun deleteByPage(pageId: Long)
 
-    // Caller must sanitize :query before calling — bare `"` or `*` will throw a SQLiteException.
+    // Caller must sanitize :query before calling, bare `"` or `*` will throw a SQLiteException.
     @Query("""
         SELECT l.id AS lineId, l.pageId, l.lineNumber,
                snippet(lines_fts, '<b>', '</b>', '...', 0, 18) AS snippet,
@@ -36,14 +36,14 @@ interface LineDao {
     suspend fun search(query: String, limit: Int = 201): List<SearchResultRow>
 
     @Query("""
-        SELECT DISTINCT p.pageNumber
+        SELECT p.pageNumber
         FROM lines_fts
         JOIN lines  AS l ON lines_fts.rowid = l.id
         JOIN pages  AS p ON l.pageId  = p.id
         JOIN documents AS d ON p.docId = d.id
         WHERE lines_fts MATCH :query
           AND d.uri = :docUri
-        ORDER BY p.pageNumber
+        ORDER BY p.pageNumber, l.lineNumber
     """)
     suspend fun searchPagesInDocument(query: String, docUri: String): List<Int>
 }

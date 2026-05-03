@@ -1,7 +1,8 @@
 package com.lumen.app.domain.model
 
 data class SearchFilters(
-    val folderUris: Set<String> = emptySet(),
+    // Stable folder identifiers (tree document IDs), not raw URI strings.
+    val folderIds: Set<String> = emptySet(),
     val ocrOnly: Boolean = false,
     val sortOrder: SortOrder = SortOrder.RELEVANCE,
 )

@@ -33,7 +33,7 @@ class TesseractOcrEngine @Inject constructor(
                 trainedDataFile.outputStream().use { dst -> src.copyTo(dst) }
             }
         } catch (_: Exception) {
-            // Asset not bundled — Tesseract will silently skip on each call
+            // Asset not bundled, Tesseract will silently skip on each call
         }
     }
 

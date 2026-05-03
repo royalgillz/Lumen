@@ -117,7 +117,7 @@ class IndexWorker @AssistedInject constructor(
             pages.add(PageData(pageIndex, rawText, needsOcr))
         }
 
-        // Pass 2: OCR — open PdfRenderer once for all pages that need it
+        // Pass 2: OCR, open PdfRenderer once for all pages that need it
         val ocrTexts = mutableMapOf<Int, String>()
         val ocrPageIndices = pages.filter { it.needsOcr }.map { it.index }
         if (ocrPageIndices.isNotEmpty()) {

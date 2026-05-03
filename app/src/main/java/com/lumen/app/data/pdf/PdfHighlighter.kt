@@ -35,7 +35,6 @@ class PdfHighlighter @Inject constructor() {
                 val stripper = KeywordStripper(
                     keyword = keyword.trim().lowercase(),
                     cropOffsetX = box.lowerLeftX,
-                    cropOffsetY = box.lowerLeftY,
                 )
                 stripper.startPage = pageIndex + 1
                 stripper.endPage = pageIndex + 1
@@ -54,7 +53,6 @@ class PdfHighlighter @Inject constructor() {
 private class KeywordStripper(
     private val keyword: String,
     private val cropOffsetX: Float = 0f,
-    private val cropOffsetY: Float = 0f,
 ) : PDFTextStripper() {
 
     private val collected = mutableListOf<TextPosition>()
@@ -93,14 +91,12 @@ private class KeywordStripper(
             val slice = collected.subList(posStart, posEnd)
 
             if (slice.isNotEmpty()) {
-                // Subtract cropBox origin so coordinates are relative to the rendered page
-                val left = slice.minOf { it.x } - cropOffsetX
-                val right = slice.maxOf { it.x + it.width } - cropOffsetX
-                // PDF Y=0 at bottom; getY() is the baseline. Flip to screen space (Y=0 at top).
-                val pdfYBaseline = slice.minOf { it.y } - cropOffsetY
-                val pdfYTop = slice.maxOf { it.y + it.height } - cropOffsetY
-                val screenTop = pageHeightPts - pdfYTop
-                val screenBottom = pageHeightPts - pdfYBaseline
+                // Use direction-adjusted metrics from PDFBox so rotation/layout is normalized.
+                // getYDirAdj is already in display space (top-origin), so we do not flip Y again.
+                val left = slice.minOf { it.xDirAdj } - cropOffsetX
+                val right = slice.maxOf { it.xDirAdj + it.widthDirAdj } - cropOffsetX
+                val screenTop = (slice.minOf { it.yDirAdj - it.heightDir } - 1f).coerceAtLeast(0f)
+                val screenBottom = (slice.maxOf { it.yDirAdj } + 1f).coerceAtMost(pageHeightPts)
                 highlights.add(RectF(left - 1f, screenTop, right + 1f, screenBottom))
             }
 

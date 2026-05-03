@@ -2,7 +2,7 @@ package com.lumen.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Primary — Forest Green
+// Primary, Forest Green
 val ForestGreen = Color(0xFF2A4D3A)
 val ForestGreenDark = Color(0xFF9DC2A8)
 

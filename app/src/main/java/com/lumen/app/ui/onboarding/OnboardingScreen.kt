@@ -1,5 +1,8 @@
 package com.lumen.app.ui.onboarding
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -7,6 +10,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,17 +27,17 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -41,39 +45,54 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.ui.icons.FolderIcon
+import com.lumen.app.ui.icons.LumenBrandIcon
+import com.lumen.app.ui.icons.PrivacyIcon
+import com.lumen.app.ui.icons.SearchDocIcon
 
 private data class OnboardingPage(
-    val icon: ImageVector,
+    val iconKind: String,
     val title: String,
     val body: String,
 )
 
 private val pages = listOf(
     OnboardingPage(
-        Icons.Default.Search,
-        "Find anything, instantly",
-        "Full-text search across every word on every page — results appear as you type.",
+        "privacy",
+        "Your PDFs stay on this device",
+        "Lumen has no internet permission, no analytics, and no uploads.",
     ),
     OnboardingPage(
-        Icons.Default.FolderOpen,
-        "Your folders, your way",
-        "Lumen reads PDFs directly from any folder you pick. Nothing is copied or uploaded.",
+        "folder",
+        "Choose your first folder",
+        "Pick a folder with PDFs. You can add more folders later in Library.",
     ),
     OnboardingPage(
-        Icons.Default.Shield,
-        "Private by design",
-        "Zero internet permissions. No analytics, no telemetry. Your files never leave your device.",
+        "search",
+        "Building your search index",
+        "Indexing starts in the background and search gets better as pages are processed.",
     ),
 )
 
 @Composable
-fun OnboardingScreen(onFinished: () -> Unit) {
+fun OnboardingScreen(
+    onFinished: () -> Unit,
+    viewModel: OnboardingViewModel = hiltViewModel(),
+) {
     var currentPage by remember { mutableIntStateOf(0) }
+    val selectedFolder by viewModel.selectedFolder.collectAsState()
+    val isIndexing by viewModel.isIndexing.collectAsState()
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let { viewModel.setSelectedFolder(it) }
+    }
 
     Column(
         modifier = Modifier
@@ -95,6 +114,27 @@ fun OnboardingScreen(onFinished: () -> Unit) {
             },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                LumenBrandIcon()
+            }
+            Text(
+                text = "Welcome to Lumen",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
         Spacer(Modifier.weight(1f))
 
         AnimatedContent(
@@ -108,7 +148,7 @@ fun OnboardingScreen(onFinished: () -> Unit) {
             },
             label = "onboarding_page",
         ) { page ->
-            PageContent(pages[page])
+            PageContent(pages[page], currentPage = page)
         }
 
         Spacer(Modifier.weight(1f))
@@ -148,19 +188,40 @@ fun OnboardingScreen(onFinished: () -> Unit) {
                 TextButton(onClick = onFinished) {
                     Text("Skip", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Button(
-                    onClick = { currentPage++ },
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                    ),
-                ) {
-                    Text("Next", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (currentPage == 1) {
+                        OutlinedButton(
+                            onClick = { folderPickerLauncher.launch(null) },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(if (selectedFolder == null) "Pick folder" else "Folder selected")
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            if (currentPage == 1 && selectedFolder == null) {
+                                folderPickerLauncher.launch(null)
+                            } else {
+                                currentPage++
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    ) {
+                        Text("Next", fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         } else {
             Button(
-                onClick = onFinished,
+                onClick = {
+                    if (selectedFolder != null) {
+                        viewModel.addFolderAndStartIndexing()
+                    }
+                    onFinished()
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp),
@@ -170,7 +231,7 @@ fun OnboardingScreen(onFinished: () -> Unit) {
                 ),
             ) {
                 Text(
-                    "Get started",
+                    if (isIndexing) "Start searching (indexing...)" else "Start searching",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -180,7 +241,7 @@ fun OnboardingScreen(onFinished: () -> Unit) {
 }
 
 @Composable
-private fun PageContent(page: OnboardingPage) {
+private fun PageContent(page: OnboardingPage, currentPage: Int) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.padding(horizontal = 8.dp),
@@ -200,12 +261,11 @@ private fun PageContent(page: OnboardingPage) {
                     .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    page.icon,
-                    contentDescription = null,
-                    modifier = Modifier.size(56.dp),
-                    tint = MaterialTheme.colorScheme.primary,
-                )
+                when (page.iconKind) {
+                    "privacy" -> PrivacyIcon(MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
+                    "folder" -> FolderIcon(MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
+                    else -> SearchDocIcon(MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
+                }
             }
         }
 
@@ -227,5 +287,43 @@ private fun PageContent(page: OnboardingPage) {
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Spacer(Modifier.height(18.dp))
+
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(14.dp)),
+        ) {
+            val detail = when (currentPage) {
+                0 -> "Verified by Android OS permissions. This app cannot make network calls."
+                1 -> "Use the button below to grant folder access with SAF."
+                else -> "Indexing runs in background and search is available right away."
+            }
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            )
+        }
+
+        if (currentPage == 2) {
+            Spacer(Modifier.height(12.dp))
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Found PDFs are indexed in the background.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }

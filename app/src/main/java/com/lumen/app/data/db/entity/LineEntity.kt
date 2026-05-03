@@ -5,7 +5,7 @@ import androidx.room.Fts4
 import androidx.room.FtsOptions
 
 // FTS4 virtual table backed by the `lines` content table.
-// Only `text` is declared here — that's the only column indexed for search.
+// Only `text` is declared here, that is the only column indexed for search.
 // Room auto-generates INSERT/UPDATE/DELETE triggers on `lines` to keep the index in sync.
 @Fts4(
     contentEntity = LineContentEntity::class,

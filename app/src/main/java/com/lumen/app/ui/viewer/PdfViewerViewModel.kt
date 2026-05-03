@@ -34,7 +34,10 @@ class PdfViewerViewModel @Inject constructor(
     private var highlightJob: Job? = null
 
     fun loadHighlights(uri: String, pageIndex: Int, keyword: String) {
-        if (keyword.isBlank()) return
+        if (keyword.isBlank()) {
+            clearHighlights()
+            return
+        }
         val parsedUri = try { Uri.parse(uri) } catch (_: Exception) { return }
         highlightJob?.cancel()
         highlightJob = viewModelScope.launch(Dispatchers.IO) {
@@ -61,7 +64,7 @@ class PdfViewerViewModel @Inject constructor(
     private var inDocSearchJob: Job? = null
 
     fun searchInDocument(docUri: String, rawQuery: String) {
-        if (rawQuery.isBlank()) {
+        if (rawQuery.isBlank() || rawQuery.trim().length < 2) {
             _viewerMatchPages.value = emptyList()
             viewerMatchIndex.value = 0
             return

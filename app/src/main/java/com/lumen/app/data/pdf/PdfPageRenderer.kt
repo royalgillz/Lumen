@@ -35,7 +35,7 @@ class PdfPageRenderer @Inject constructor(
 
     /**
      * Opens the PDF once and calls [onPage] for each index in [pageIndices] in order.
-     * The bitmap passed to [onPage] is recycled immediately after it returns — do not
+     * The bitmap passed to [onPage] is recycled immediately after it returns, do not
      * hold a reference past the callback.
      */
     suspend fun renderPagesInSession(

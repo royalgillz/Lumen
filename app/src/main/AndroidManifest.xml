@@ -47,7 +47,7 @@
             </intent-filter>
         </activity>
 
-        <!-- WorkManager foreground service — must declare type to match FOREGROUND_SERVICE_DATA_SYNC -->
+        <!-- WorkManager foreground service, must declare type to match FOREGROUND_SERVICE_DATA_SYNC -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"

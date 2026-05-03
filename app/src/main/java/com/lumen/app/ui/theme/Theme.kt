@@ -14,8 +14,9 @@ import androidx.core.view.WindowCompat
 private val LightColorScheme = lightColorScheme(
     primary = ForestGreen,
     onPrimary = OnPrimaryLight,
-    primaryContainer = Color(0xFFB8DFBF),
-    onPrimaryContainer = Color(0xFF002110),
+    // Revamp: darker toolbar/background container for stronger contrast in light mode.
+    primaryContainer = ForestGreen,
+    onPrimaryContainer = Color.White,
     secondary = AmberAccent,
     onSecondary = Color(0xFF3E2800),
     secondaryContainer = Color(0xFFFFDDB4),
