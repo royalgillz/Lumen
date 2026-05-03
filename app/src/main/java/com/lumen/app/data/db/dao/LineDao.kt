@@ -21,7 +21,7 @@ interface LineDao {
     // Caller must sanitize :query before calling — bare `"` or `*` will throw a SQLiteException.
     @Query("""
         SELECT l.id AS lineId, l.pageId, l.lineNumber,
-               snippet(lines_fts, '', '<b>', '</b>', '...', 0, 18) AS snippet,
+               snippet(lines_fts, '<b>', '</b>', '...', 0, 18) AS snippet,
                p.pageNumber, p.isOcr,
                d.id AS docId, d.uri, d.filename, d.treeUri, d.indexedAt
         FROM lines_fts

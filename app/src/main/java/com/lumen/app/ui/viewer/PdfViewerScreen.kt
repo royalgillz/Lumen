@@ -92,6 +92,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.github.barteksc.pdfviewer.PDFView
 import com.github.barteksc.pdfviewer.listener.OnPageChangeListener
 import com.lumen.app.ui.theme.AmberAccent
+import androidx.compose.ui.graphics.toArgb
 import kotlinx.coroutines.launch
 import java.io.FileNotFoundException
 
@@ -171,14 +172,19 @@ fun PdfViewerScreen(
     val matchPages by viewModel.viewerMatchPages.collectAsState()
     val matchIndex by viewModel.viewerMatchIndex.collectAsState()
 
-    // ── Status bar: force light icons against the dark primary top bar ───────
+    // ── Status bar: match the primary top-bar color so it's seamless on all API levels ─────
+    // Light mode  → primary = ForestGreen (#2A4D3A, dark)  → white icons (isLight = false)
+    // Dark  mode  → primary = MintGreen   (#9DC2A8, light) → dark  icons (isLight = true)
+    val primaryArgb = MaterialTheme.colorScheme.primary.toArgb()
     SideEffect {
         val window = (view.context as Activity).window
-        WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+        window.statusBarColor = primaryArgb
+        WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = isDarkTheme
     }
     DisposableEffect(Unit) {
         onDispose {
             val window = (view.context as Activity).window
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
             val lp = window.attributes
             lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
             window.attributes = lp
