@@ -21,9 +21,9 @@ interface LineDao {
     // Caller must sanitize :query before calling — bare `"` or `*` will throw a SQLiteException.
     @Query("""
         SELECT l.id AS lineId, l.pageId, l.lineNumber,
-               snippet('', '', '...', 0, 18) AS snippet,
+               snippet(lines_fts, '', '', '...', 0, 18) AS snippet,
                p.pageNumber, p.isOcr,
-               d.id AS docId, d.uri, d.filename
+               d.id AS docId, d.uri, d.filename, d.treeUri, d.indexedAt
         FROM lines_fts
         JOIN lines  AS l ON lines_fts.rowid = l.id
         JOIN pages  AS p ON l.pageId  = p.id
@@ -33,7 +33,19 @@ interface LineDao {
         ORDER BY d.filename, p.pageNumber, l.lineNumber
         LIMIT :limit
     """)
-    suspend fun search(query: String, limit: Int = 200): List<SearchResultRow>
+    suspend fun search(query: String, limit: Int = 201): List<SearchResultRow>
+
+    @Query("""
+        SELECT DISTINCT p.pageNumber
+        FROM lines_fts
+        JOIN lines  AS l ON lines_fts.rowid = l.id
+        JOIN pages  AS p ON l.pageId  = p.id
+        JOIN documents AS d ON p.docId = d.id
+        WHERE lines_fts MATCH :query
+          AND d.uri = :docUri
+        ORDER BY p.pageNumber
+    """)
+    suspend fun searchPagesInDocument(query: String, docUri: String): List<Int>
 }
 
 data class SearchResultRow(
@@ -45,5 +57,7 @@ data class SearchResultRow(
     val isOcr: Boolean,
     val docId: Long,
     val uri: String,
-    val filename: String
+    val filename: String,
+    val treeUri: String,
+    val indexedAt: Long?,
 )

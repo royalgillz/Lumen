@@ -35,13 +35,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.lumen.app.BuildConfig
 
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
 
     if (showDeleteConfirm) {
         AlertDialog(
@@ -56,6 +60,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             confirmButton = {
                 TextButton(
                     onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         viewModel.deleteIndex()
                         showDeleteConfirm = false
                     }
@@ -167,6 +172,7 @@ private fun PrivacyRow(icon: ImageVector, title: String, subtitle: String, isGoo
 
 @Composable
 private fun DataCard(onDeleteIndex: () -> Unit) {
+    val haptic = LocalHapticFeedback.current
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -175,10 +181,7 @@ private fun DataCard(onDeleteIndex: () -> Unit) {
         tonalElevation = 1.dp,
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                "Search Index",
-                style = MaterialTheme.typography.titleMedium,
-            )
+            Text("Search Index", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(6.dp))
             Text(
                 "Deletes all indexed text from your PDFs. Your actual PDF files are not affected. " +
@@ -188,17 +191,16 @@ private fun DataCard(onDeleteIndex: () -> Unit) {
             )
             Spacer(Modifier.height(12.dp))
             Button(
-                onClick = onDeleteIndex,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onDeleteIndex()
+                },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.errorContainer,
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                 ),
             ) {
-                Icon(
-                    Icons.Default.Delete,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                )
+                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Delete Search Index")
             }
@@ -219,7 +221,7 @@ private fun AboutCard() {
             Text("Lumen", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Version 1.0 · Privacy-first offline PDF search",
+                "Version ${BuildConfig.VERSION_NAME} · Privacy-first offline PDF search",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

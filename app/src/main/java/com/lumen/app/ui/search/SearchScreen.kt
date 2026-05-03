@@ -3,14 +3,25 @@ package com.lumen.app.ui.search
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.widget.Toast
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -25,32 +37,48 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.Button
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -61,9 +89,12 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
+import com.lumen.app.domain.model.SortOrder
 import com.lumen.app.ui.theme.AmberAccent
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel = hiltViewModel(),
@@ -76,6 +107,26 @@ fun SearchScreen(
     val isTruncated by viewModel.isTruncated.collectAsState()
     val indexedCount by viewModel.indexedCount.collectAsState()
     val isIndexing by viewModel.isIndexing.collectAsState()
+    val searchHistory by viewModel.searchHistory.collectAsState()
+    val availableFolders by viewModel.availableFolders.collectAsState()
+    val filters by viewModel.filters.collectAsState()
+
+    var isSearchFieldFocused by remember { mutableStateOf(false) }
+    var showFilterSheet by remember { mutableStateOf(false) }
+
+    val showHistory = isSearchFieldFocused && query.isBlank() && searchHistory.isNotEmpty()
+    val activeFilterCount = (if (filters.folderUris.isNotEmpty()) 1 else 0) +
+        (if (filters.ocrOnly) 1 else 0) +
+        (if (filters.sortOrder != SortOrder.RELEVANCE) 1 else 0)
+
+    if (showFilterSheet) {
+        SearchFilterSheet(
+            filters = filters,
+            availableFolders = availableFolders,
+            onFiltersChange = { viewModel.filters.value = it },
+            onDismiss = { showFilterSheet = false },
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -85,8 +136,11 @@ fun SearchScreen(
         SearchHeader(
             query = query,
             indexedCount = indexedCount,
+            activeFilterCount = activeFilterCount,
             onQueryChange = { viewModel.query.value = it },
             onClearQuery = { viewModel.query.value = "" },
+            onFocusChange = { isSearchFieldFocused = it },
+            onFilterClick = { showFilterSheet = true },
         )
 
         if (isIndexing) {
@@ -103,24 +157,23 @@ fun SearchScreen(
                     color = MaterialTheme.colorScheme.primary,
                     trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
                 )
-                Text(
-                    "Indexing\u2026",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
+                Text("Indexing…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
             }
         }
 
         Box(modifier = Modifier.fillMaxSize()) {
             when {
+                showHistory -> SearchHistoryList(
+                    history = searchHistory,
+                    onSelect = { viewModel.query.value = it },
+                    onRemove = { viewModel.removeHistoryItem(it) },
+                    onClearAll = { viewModel.clearHistory() },
+                )
                 query.trim().length < 2 -> SearchEmptyState(
                     indexedCount = indexedCount,
                     onOpenLibrary = onOpenLibrary,
                 )
-                isSearching -> CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center),
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                isSearching -> SkeletonResultList()
                 results.isEmpty() -> NoResultsState(
                     query = query,
                     onOpenLibrary = onOpenLibrary,
@@ -131,6 +184,7 @@ fun SearchScreen(
                     results = results,
                     isTruncated = isTruncated,
                     onResultClick = { uri, page, filename ->
+                        viewModel.onResultSelected(query.trim())
                         onResultClick(uri, page, filename, query.trim())
                     },
                 )
@@ -143,13 +197,14 @@ fun SearchScreen(
 private fun SearchHeader(
     query: String,
     indexedCount: Int,
+    activeFilterCount: Int,
     onQueryChange: (String) -> Unit,
     onClearQuery: () -> Unit,
+    onFocusChange: (Boolean) -> Unit,
+    onFilterClick: () -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
-    }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
     Column(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
         Row(
@@ -171,53 +226,86 @@ private fun SearchHeader(
                     .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    Icons.Default.Shield,
-                    contentDescription = "Privacy: offline only",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp),
-                )
+                Icon(Icons.Default.Shield, contentDescription = "Privacy: offline only", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
             }
         }
 
-        TextField(
-            value = query,
-            onValueChange = onQueryChange,
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .focusRequester(focusRequester),
-            placeholder = { Text("Search your PDFs\u2026") },
-            leadingIcon = {
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .focusRequester(focusRequester)
+                    .onFocusChanged { onFocusChange(it.isFocused) },
+                placeholder = { Text("Search your PDFs…") },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = if (query.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                trailingIcon = if (query.isNotEmpty()) {
+                    {
+                        IconButton(onClick = onClearQuery) {
+                            Icon(Icons.Default.Clear, contentDescription = "Clear search", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                } else null,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent,
+                ),
+            )
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        if (activeFilterCount > 0) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .clickable(onClick = onFilterClick),
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(
-                    Icons.Default.Search,
-                    contentDescription = null,
-                    tint = if (query.isNotEmpty()) MaterialTheme.colorScheme.primary
+                    Icons.Default.FilterList,
+                    contentDescription = "Filters",
+                    tint = if (activeFilterCount > 0) MaterialTheme.colorScheme.primary
                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
                 )
-            },
-            trailingIcon = if (query.isNotEmpty()) {
-                {
-                    IconButton(onClick = onClearQuery) {
-                        Icon(
-                            Icons.Default.Clear,
-                            contentDescription = "Clear search",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (activeFilterCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .size(14.dp)
+                            .background(AmberAccent, CircleShape)
+                            .align(Alignment.TopEnd)
+                            .padding(end = 2.dp, top = 2.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = activeFilterCount.toString(),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                            color = Color.White,
                         )
                     }
                 }
-            } else null,
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent,
-                disabledIndicatorColor = Color.Transparent,
-            ),
-        )
+            }
+        }
 
         if (indexedCount > 0) {
             Text(
@@ -231,6 +319,85 @@ private fun SearchHeader(
         }
 
         HorizontalDivider()
+    }
+}
+
+@Composable
+private fun SearchHistoryList(
+    history: List<String>,
+    onSelect: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onClearAll: () -> Unit,
+) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Recent",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Clear all",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable(onClick = onClearAll),
+                )
+            }
+        }
+        items(history, key = { it }) { item ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(item) }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(12.dp))
+                Text(item, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                IconButton(onClick = { onRemove(item) }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Clear, contentDescription = "Remove", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+        }
+    }
+}
+
+@Composable
+private fun SkeletonResultList() {
+    val infiniteTransition = rememberInfiniteTransition(label = "shimmer")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 0.55f,
+        animationSpec = infiniteRepeatable(tween(750), RepeatMode.Reverse),
+        label = "alpha",
+    )
+    val shimmerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
+
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        items(7) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Box(modifier = Modifier.fillMaxWidth(0.55f).height(14.dp).background(shimmerColor, RoundedCornerShape(4.dp)))
+                    Box(modifier = Modifier.width(40.dp).height(14.dp).background(shimmerColor, RoundedCornerShape(4.dp)))
+                }
+                Spacer(Modifier.height(8.dp))
+                Box(modifier = Modifier.fillMaxWidth().height(11.dp).background(shimmerColor, RoundedCornerShape(4.dp)))
+                Spacer(Modifier.height(5.dp))
+                Box(modifier = Modifier.fillMaxWidth(0.75f).height(11.dp).background(shimmerColor, RoundedCornerShape(4.dp)))
+                Spacer(Modifier.height(5.dp))
+                Box(modifier = Modifier.fillMaxWidth(0.4f).height(10.dp).background(shimmerColor, RoundedCornerShape(4.dp)))
+            }
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+        }
     }
 }
 
@@ -265,9 +432,7 @@ private fun ResultList(
                     text = "Showing first 200 results — try a more specific query",
                     style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 )
             }
         }
@@ -282,126 +447,244 @@ fun ResultRow(
     onClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = {
+    val haptic = LocalHapticFeedback.current
+    var showMenu by remember { mutableStateOf(false) }
+
+    Box {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .combinedClickable(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onClick()
+                    },
+                    onLongClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        showMenu = true
+                    },
+                )
+                .padding(horizontal = 16.dp, vertical = 13.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = result.filename,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "p. ${result.pageNumber + 1}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AmberAccent,
+                    modifier = Modifier
+                        .padding(start = 8.dp)
+                        .background(AmberAccent.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+
+            Spacer(Modifier.height(4.dp))
+
+            Text(
+                text = buildHighlightedSnippet(
+                    query = query,
+                    snippet = result.snippet,
+                    highlightColor = AmberAccent.copy(alpha = 0.18f),
+                    highlightTextColor = MaterialTheme.colorScheme.onBackground,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                lineHeight = 19.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            if (result.folderName.isNotEmpty()) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = result.folderName,
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            if (result.isOcr) {
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    text = "OCR",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("Open at page ${result.pageNumber + 1}") },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                    showMenu = false
+                    onClick()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Copy snippet") },
+                leadingIcon = { Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                    showMenu = false
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clip = ClipData.newPlainText("Lumen snippet", result.snippet)
-                    clipboard.setPrimaryClip(clip)
-                    // Android 13+ shows its own clipboard toast; show one for older versions
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Lumen snippet", result.snippet))
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                         Toast.makeText(context, "Snippet copied", Toast.LENGTH_SHORT).show()
                     }
                 },
             )
-            .padding(horizontal = 16.dp, vertical = 13.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = result.filename,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = "p. ${result.pageNumber + 1}",
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-                color = AmberAccent,
-                modifier = Modifier
-                    .padding(start = 8.dp)
-                    .background(AmberAccent.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            )
-        }
-
-        Spacer(Modifier.height(4.dp))
-
-        Text(
-            text = buildHighlightedSnippet(
-                query = query,
-                snippet = result.snippet,
-                highlightColor = AmberAccent.copy(alpha = 0.18f),
-                highlightTextColor = MaterialTheme.colorScheme.onBackground,
-            ),
-            style = MaterialTheme.typography.bodySmall,
-            lineHeight = 19.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
-
-        if (result.folderName.isNotEmpty()) {
-            Spacer(Modifier.height(3.dp))
-            Text(
-                text = result.folderName,
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
-                color = MaterialTheme.colorScheme.outline,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-
-        if (result.isOcr) {
-            Spacer(Modifier.height(5.dp))
-            Text(
-                text = "OCR",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.5.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            DropdownMenuItem(
+                text = { Text("Share") },
+                leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                    showMenu = false
+                    val text = "${result.filename} · p.${result.pageNumber + 1}\n\n${result.snippet}"
+                    context.startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, text)
+                            },
+                            "Share snippet"
+                        )
+                    )
+                },
             )
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-private fun SearchEmptyState(
-    indexedCount: Int,
-    onOpenLibrary: () -> Unit,
+private fun SearchFilterSheet(
+    filters: SearchFilters,
+    availableFolders: Set<android.net.Uri>,
+    onFiltersChange: (SearchFilters) -> Unit,
+    onDismiss: () -> Unit,
 ) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text("Search filters", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+
+            if (availableFolders.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Folder", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        availableFolders.forEach { uri ->
+                            val uriStr = uri.toString()
+                            val label = uri.lastPathSegment ?: uriStr
+                            FilterChip(
+                                selected = uriStr in filters.folderUris,
+                                onClick = {
+                                    val newSet = filters.folderUris.toMutableSet()
+                                    if (uriStr in newSet) newSet.remove(uriStr) else newSet.add(uriStr)
+                                    onFiltersChange(filters.copy(folderUris = newSet))
+                                },
+                                label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            )
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider()
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("OCR results only", style = MaterialTheme.typography.bodyMedium)
+                    Text("Show only scanned pages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = filters.ocrOnly,
+                    onCheckedChange = { onFiltersChange(filters.copy(ocrOnly = it)) },
+                )
+            }
+
+            HorizontalDivider()
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Sort by", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SortOrder.entries.forEach { order ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onFiltersChange(filters.copy(sortOrder = order)) }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = filters.sortOrder == order,
+                            onClick = { onFiltersChange(filters.copy(sortOrder = order)) },
+                        )
+                        Text(order.displayName, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+
+            if (filters != SearchFilters()) {
+                OutlinedButton(
+                    onClick = { onFiltersChange(SearchFilters()) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Reset filters")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchEmptyState(indexedCount: Int, onOpenLibrary: () -> Unit) {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 32.dp),
+        modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Box(
-            modifier = Modifier
-                .size(56.dp)
-                .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(16.dp)),
+            modifier = Modifier.size(56.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(16.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                Icons.Default.Search,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(26.dp),
-            )
+            Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
         }
         Spacer(Modifier.height(16.dp))
-        Text(
-            text = "What are you looking for?",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
+        Text("What are you looking for?", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground)
         Spacer(Modifier.height(6.dp))
         Text(
             text = if (indexedCount > 0)
@@ -413,11 +696,7 @@ private fun SearchEmptyState(
         )
         Spacer(Modifier.height(16.dp))
         OutlinedButton(onClick = onOpenLibrary) {
-            Icon(
-                imageVector = Icons.Default.FolderOpen,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-            )
+            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
             Spacer(Modifier.size(8.dp))
             Text("Go to library")
         }
@@ -425,37 +704,19 @@ private fun SearchEmptyState(
 }
 
 @Composable
-private fun NoResultsState(
-    query: String,
-    onOpenLibrary: () -> Unit,
-    onClearQuery: () -> Unit,
-) {
+private fun NoResultsState(query: String, onOpenLibrary: () -> Unit, onClearQuery: () -> Unit) {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
+        modifier = Modifier.fillMaxSize().padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text(
-            text = "No results for \u201C$query\u201D",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Text("No results for “$query”", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Try a different word, or check that the folder is indexed",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.outline,
-        )
+        Text("Try a different word, or check that the folder is indexed", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onClearQuery) {
-                Text("Clear search")
-            }
-            Button(onClick = onOpenLibrary) {
-                Text("Open library")
-            }
+            OutlinedButton(onClick = onClearQuery) { Text("Clear search") }
+            Button(onClick = onOpenLibrary) { Text("Open library") }
         }
     }
 }
@@ -466,54 +727,33 @@ private fun buildHighlightedSnippet(
     highlightColor: Color,
     highlightTextColor: Color,
 ) = buildAnnotatedString {
-    append("\u201C\u2026")
-    if (query.isBlank()) {
-        append(snippet)
-        append("\u2026\u201D")
-        return@buildAnnotatedString
-    }
+    append("“…")
+    if (query.isBlank()) { append(snippet); append("…”"); return@buildAnnotatedString }
 
-    val tokens = query
-        .trim()
-        .split(Regex("\\s+"))
-        .filter { it.length >= 2 }
-        .distinct()
-
-    if (tokens.isEmpty()) {
-        append(snippet)
-        append("\u2026\u201D")
-        return@buildAnnotatedString
-    }
+    val tokens = query.trim().split(Regex("\\s+")).filter { it.length >= 2 }.distinct()
+    if (tokens.isEmpty()) { append(snippet); append("…”"); return@buildAnnotatedString }
 
     val ranges = mutableListOf<IntRange>()
     val lowerSnippet = snippet.lowercase()
     for (token in tokens) {
-        val lowerToken = token.lowercase()
-        var searchStart = 0
-        while (searchStart < lowerSnippet.length) {
-            val found = lowerSnippet.indexOf(lowerToken, searchStart)
+        val lower = token.lowercase()
+        var start = 0
+        while (start < lowerSnippet.length) {
+            val found = lowerSnippet.indexOf(lower, start)
             if (found == -1) break
-            ranges += IntRange(found, found + lowerToken.length - 1)
-            searchStart = found + lowerToken.length
+            ranges += IntRange(found, found + lower.length - 1)
+            start = found + lower.length
         }
     }
 
-    if (ranges.isEmpty()) {
-        append(snippet)
-        append("\u2026\u201D")
-        return@buildAnnotatedString
-    }
+    if (ranges.isEmpty()) { append(snippet); append("…”"); return@buildAnnotatedString }
 
-    val merged = ranges.sortedBy { it.first }.fold(mutableListOf<IntRange>()) { acc, current ->
-        if (acc.isEmpty()) {
-            acc += current
-        } else {
-            val previous = acc.last()
-            if (current.first <= previous.last + 1) {
-                acc[acc.lastIndex] = IntRange(previous.first, maxOf(previous.last, current.last))
-            } else {
-                acc += current
-            }
+    val merged = ranges.sortedBy { it.first }.fold(mutableListOf<IntRange>()) { acc, cur ->
+        if (acc.isEmpty()) { acc += cur }
+        else {
+            val prev = acc.last()
+            if (cur.first <= prev.last + 1) acc[acc.lastIndex] = IntRange(prev.first, maxOf(prev.last, cur.last))
+            else acc += cur
         }
         acc
     }
@@ -521,17 +761,11 @@ private fun buildHighlightedSnippet(
     var cursor = 0
     for (range in merged) {
         if (cursor < range.first) append(snippet.substring(cursor, range.first))
-        withStyle(
-            SpanStyle(
-                color = highlightTextColor,
-                fontWeight = FontWeight.SemiBold,
-                background = highlightColor,
-            )
-        ) {
+        withStyle(SpanStyle(color = highlightTextColor, fontWeight = FontWeight.SemiBold, background = highlightColor)) {
             append(snippet.substring(range.first, range.last + 1))
         }
         cursor = range.last + 1
     }
     if (cursor < snippet.length) append(snippet.substring(cursor))
-    append("\u2026\u201D")
+    append("…”")
 }
