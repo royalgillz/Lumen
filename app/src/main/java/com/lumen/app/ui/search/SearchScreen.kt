@@ -726,46 +726,30 @@ private fun buildHighlightedSnippet(
     snippet: String,
     highlightColor: Color,
     highlightTextColor: Color,
-) = buildAnnotatedString {
+): androidx.compose.ui.text.AnnotatedString = buildAnnotatedString {
     append("“…")
-    if (query.isBlank()) { append(snippet); append("…”"); return@buildAnnotatedString }
-
-    val tokens = query.trim().split(Regex("\\s+")).filter { it.length >= 2 }.distinct()
-    if (tokens.isEmpty()) { append(snippet); append("…”"); return@buildAnnotatedString }
-
-    val ranges = mutableListOf<IntRange>()
-    val lowerSnippet = snippet.lowercase()
-    for (token in tokens) {
-        val lower = token.lowercase()
-        var start = 0
-        while (start < lowerSnippet.length) {
-            val found = lowerSnippet.indexOf(lower, start)
-            if (found == -1) break
-            ranges += IntRange(found, found + lower.length - 1)
-            start = found + lower.length
-        }
+    if (snippet.isBlank()) {
+        append("…”")
+        return@buildAnnotatedString
     }
-
-    if (ranges.isEmpty()) { append(snippet); append("…”"); return@buildAnnotatedString }
-
-    val merged = ranges.sortedBy { it.first }.fold(mutableListOf<IntRange>()) { acc, cur ->
-        if (acc.isEmpty()) { acc += cur }
-        else {
-            val prev = acc.last()
-            if (cur.first <= prev.last + 1) acc[acc.lastIndex] = IntRange(prev.first, maxOf(prev.last, cur.last))
-            else acc += cur
+    // Parse <b>...</b> markers from FTS4 snippet
+    var i = 0
+    while (i < snippet.length) {
+        val bOpen = snippet.indexOf("<b>", i)
+        if (bOpen == -1) {
+            append(snippet.substring(i))
+            break
         }
-        acc
-    }
-
-    var cursor = 0
-    for (range in merged) {
-        if (cursor < range.first) append(snippet.substring(cursor, range.first))
+        if (bOpen > i) append(snippet.substring(i, bOpen))
+        val bClose = snippet.indexOf("</b>", bOpen)
+        if (bClose == -1) {
+            append(snippet.substring(bOpen))
+            break
+        }
         withStyle(SpanStyle(color = highlightTextColor, fontWeight = FontWeight.SemiBold, background = highlightColor)) {
-            append(snippet.substring(range.first, range.last + 1))
+            append(snippet.substring(bOpen + 3, bClose))
         }
-        cursor = range.last + 1
+        i = bClose + 4
     }
-    if (cursor < snippet.length) append(snippet.substring(cursor))
     append("…”")
 }

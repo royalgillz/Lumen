@@ -2,6 +2,8 @@ package com.lumen.app.data.db.di
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lumen.app.data.db.LumenDatabase
 import dagger.Module
 import dagger.Provides
@@ -18,7 +20,13 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): LumenDatabase =
         Room.databaseBuilder(context, LumenDatabase::class.java, "lumen.db")
+            .addMigrations(LumenDatabase.MIGRATION_3_4)
             .fallbackToDestructiveMigration(true)
+            .addCallback(object : RoomDatabase.Callback() {
+                override fun onOpen(db: SupportSQLiteDatabase) {
+                    db.execSQL("PRAGMA foreign_keys = ON")
+                }
+            })
             .build()
 
     @Provides

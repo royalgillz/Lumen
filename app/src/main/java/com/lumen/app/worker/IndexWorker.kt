@@ -71,7 +71,7 @@ class IndexWorker @AssistedInject constructor(
             setProgress(workDataOf(KEY_PROGRESS to index, KEY_TOTAL to pdfs.size))
             setForeground(buildForegroundInfo("${index + 1} / ${pdfs.size}: ${pdf.filename}"))
             val completed = try {
-                withTimeoutOrNull(10 * 60 * 1000L) { indexPdf(pdf) } != null
+                withTimeoutOrNull(10 * 60 * 1000L) { indexPdf(pdf, folderUri) } != null
             } catch (_: Exception) {
                 false
             }
@@ -85,7 +85,7 @@ class IndexWorker @AssistedInject constructor(
         Result.success()
     }
 
-    private suspend fun indexPdf(pdf: PdfFile) {
+    private suspend fun indexPdf(pdf: PdfFile, folderUri: Uri) {
         val uriStr = pdf.uri.toString()
 
         val existing = documentDao.getByUri(uriStr)
@@ -100,6 +100,7 @@ class IndexWorker @AssistedInject constructor(
                 id = existing?.id ?: 0,
                 uri = uriStr,
                 filename = pdf.filename,
+                treeUri = folderUri.toString(),
                 status = DocumentEntity.STATUS_INDEXING,
                 lastModified = pdf.lastModified,
                 sizeBytes = pdf.sizeBytes,

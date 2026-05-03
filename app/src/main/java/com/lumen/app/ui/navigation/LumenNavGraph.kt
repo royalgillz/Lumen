@@ -40,10 +40,12 @@ sealed class Screen(val route: String) {
     data object PdfViewer : Screen("pdf_viewer")
 }
 
-private const val PDF_VIEWER_ROUTE = "pdf_viewer?uri={uri}&page={page}&filename={filename}"
+private const val PDF_VIEWER_ROUTE =
+    "pdf_viewer?uri={uri}&page={page}&filename={filename}&keyword={keyword}"
 
-fun pdfViewerRoute(uri: String, page: Int, filename: String): String =
-    "pdf_viewer?uri=${Uri.encode(uri)}&page=$page&filename=${Uri.encode(filename)}"
+fun pdfViewerRoute(uri: String, page: Int, filename: String, keyword: String = ""): String =
+    "pdf_viewer?uri=${Uri.encode(uri)}&page=$page" +
+    "&filename=${Uri.encode(filename)}&keyword=${Uri.encode(keyword)}"
 
 private data class Tab(val screen: Screen, val label: String, val icon: ImageVector)
 
@@ -105,8 +107,17 @@ fun LumenNavGraph(
             }
             composable(Screen.Search.route) {
                 SearchScreen(
-                    onResultClick = { uri, page, filename ->
-                        navController.navigate(pdfViewerRoute(uri, page, filename))
+                    onResultClick = { uri, page, filename, keyword ->
+                        navController.navigate(pdfViewerRoute(uri, page, filename, keyword))
+                    },
+                    onOpenLibrary = {
+                        navController.navigate(Screen.Library.route) {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
                     },
                 )
             }
@@ -118,15 +129,18 @@ fun LumenNavGraph(
                     navArgument("uri") { type = NavType.StringType; defaultValue = "" },
                     navArgument("page") { type = NavType.IntType; defaultValue = 0 },
                     navArgument("filename") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("keyword") { type = NavType.StringType; defaultValue = "" },
                 ),
             ) { backStackEntry ->
                 val uri = backStackEntry.arguments?.getString("uri") ?: ""
                 val page = backStackEntry.arguments?.getInt("page") ?: 0
                 val filename = backStackEntry.arguments?.getString("filename") ?: ""
+                val keyword = backStackEntry.arguments?.getString("keyword") ?: ""
                 PdfViewerScreen(
                     uri = uri,
                     pageNumber = page,
                     filename = filename,
+                    keyword = keyword,
                     onBack = { navController.popBackStack() },
                 )
             }

@@ -1,5 +1,6 @@
 package com.lumen.app.data.db.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -8,6 +9,7 @@ data class DocumentEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val uri: String,
     val filename: String,
+    @ColumnInfo(defaultValue = "") val treeUri: String = "",
     val status: String = STATUS_PENDING,
     val pageCount: Int = 0,
     val lastModified: Long = 0L,

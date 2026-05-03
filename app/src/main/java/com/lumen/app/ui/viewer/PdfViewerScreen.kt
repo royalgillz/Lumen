@@ -12,6 +12,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -69,15 +71,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
+import androidx.core.view.WindowCompat
+import java.util.concurrent.atomic.AtomicReference
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -106,6 +108,14 @@ private const val ZOOM_STEP = 1.25f
 private const val ZOOM_MIN = 1f
 private const val ZOOM_MAX = 8f
 
+private data class HighlightDrawData(
+    val pageIndex: Int,
+    val rects: List<android.graphics.RectF>,
+    val pageWidthPts: Float,
+    val pageHeightPts: Float,
+    val paint: android.graphics.Paint,
+)
+
 @Composable
 fun PdfViewerScreen(
     uri: String,
@@ -118,6 +128,7 @@ fun PdfViewerScreen(
     val context = LocalContext.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
+    val isDarkTheme = isSystemInDarkTheme()
     val parsedUri = remember(uri) { runCatching { Uri.parse(uri) }.getOrNull() }
 
     // ── Persistent state (survives scroll-mode rebuild) ───────────────────────
@@ -128,7 +139,21 @@ fun PdfViewerScreen(
     var isNightMode by remember { mutableStateOf(false) }
     var showPageJump by remember { mutableStateOf(false) }
     var pageJumpInput by remember { mutableStateOf("") }
-    var renderedPageWidthPx by remember { mutableFloatStateOf(0f) }
+
+    // ── Highlight draw data shared with PDFView's onDrawAll callback ──────────
+    val highlightDrawRef = remember { AtomicReference<HighlightDrawData?>(null) }
+    val dayHighlightPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.argb(89, 0xD4, 0xA2, 0x4C)
+            style = android.graphics.Paint.Style.FILL
+        }
+    }
+    val nightHighlightPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.argb(140, 0xD4, 0xA2, 0x4C)
+            style = android.graphics.Paint.Style.FILL
+        }
+    }
 
     // In-viewer search
     var isViewerSearchActive by remember { mutableStateOf(false) }
@@ -146,20 +171,27 @@ fun PdfViewerScreen(
     val matchPages by viewModel.viewerMatchPages.collectAsState()
     val matchIndex by viewModel.viewerMatchIndex.collectAsState()
 
-    // ── Brightness effects ────────────────────────────────────────────────────
-    LaunchedEffect(brightness, showBrightnessSlider) {
-        if (showBrightnessSlider) {
-            val window = (view.context as Activity).window
-            val lp = window.attributes
-            lp.screenBrightness = brightness
-            window.attributes = lp
-        }
+    // ── Status bar: force light icons against the dark primary top bar ───────
+    SideEffect {
+        val window = (view.context as Activity).window
+        WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
     }
     DisposableEffect(Unit) {
         onDispose {
             val window = (view.context as Activity).window
             val lp = window.attributes
             lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            window.attributes = lp
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !isDarkTheme
+        }
+    }
+
+    // ── Brightness effects ────────────────────────────────────────────────────
+    LaunchedEffect(brightness, showBrightnessSlider) {
+        if (showBrightnessSlider) {
+            val window = (view.context as Activity).window
+            val lp = window.attributes
+            lp.screenBrightness = brightness
             window.attributes = lp
         }
     }
@@ -183,6 +215,23 @@ fun PdfViewerScreen(
     // ── Initial keyword highlights ────────────────────────────────────────────
     LaunchedEffect(uri, pageNumber, keyword) {
         viewModel.loadHighlights(uri, pageNumber, keyword)
+    }
+
+    // ── Sync highlights → onDrawAll ref (runs on main thread, safe to invalidate) ──
+    LaunchedEffect(highlights, displayPage.intValue, isNightMode) {
+        val h = highlights
+        highlightDrawRef.set(
+            if (h != null && h.rects.isNotEmpty() && h.pageWidthPts > 0f)
+                HighlightDrawData(
+                    pageIndex = displayPage.intValue,
+                    rects = h.rects,
+                    pageWidthPts = h.pageWidthPts,
+                    pageHeightPts = h.pageHeightPts,
+                    paint = if (isNightMode) nightHighlightPaint else dayHighlightPaint,
+                )
+            else null
+        )
+        pdfView?.invalidate()
     }
 
     // ── In-viewer match navigation ────────────────────────────────────────────
@@ -234,18 +283,20 @@ fun PdfViewerScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
+                .background(MaterialTheme.colorScheme.primary)
+                .statusBarsPadding()
                 .padding(end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.onPrimary)
             }
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = filename,
                     style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -254,7 +305,7 @@ fun PdfViewerScreen(
                         text = "p. ${displayPage.intValue + 1} of ${pageCount.intValue}",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
                         modifier = Modifier.clickable { showPageJump = true },
                     )
                 }
@@ -268,7 +319,7 @@ fun PdfViewerScreen(
                     color = AmberAccent,
                     maxLines = 1,
                     modifier = Modifier
-                        .background(AmberAccent.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+                        .background(AmberAccent.copy(alpha = 0.20f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                 )
                 Spacer(Modifier.width(4.dp))
@@ -285,8 +336,8 @@ fun PdfViewerScreen(
                 Icon(
                     Icons.Default.Search,
                     contentDescription = "Search in document",
-                    tint = if (isViewerSearchActive) MaterialTheme.colorScheme.primary
-                           else MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = if (isViewerSearchActive) AmberAccent
+                           else MaterialTheme.colorScheme.onPrimary,
                 )
             }
 
@@ -295,7 +346,7 @@ fun PdfViewerScreen(
                 Icon(
                     Icons.Default.BrightnessMedium,
                     contentDescription = "Brightness",
-                    tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onPrimary,
                 )
             }
 
@@ -304,7 +355,7 @@ fun PdfViewerScreen(
                 Icon(
                     imageVector = if (isNightMode) Icons.Default.LightMode else Icons.Default.DarkMode,
                     contentDescription = if (isNightMode) "Day mode" else "Night mode",
-                    tint = if (isNightMode) AmberAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = if (isNightMode) AmberAccent else MaterialTheme.colorScheme.onPrimary,
                 )
             }
 
@@ -313,7 +364,7 @@ fun PdfViewerScreen(
                 Icon(
                     imageVector = if (scrollHorizontal) Icons.Default.SwapVert else Icons.Default.SwapHoriz,
                     contentDescription = if (scrollHorizontal) "Switch to vertical scroll" else "Switch to horizontal scroll",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = MaterialTheme.colorScheme.onPrimary,
                 )
             }
         }
@@ -459,14 +510,24 @@ fun PdfViewerScreen(
                                                 }
                                             }
                                         })
-                                        .onLoad { _ ->
-                                            isLoading = false
-                                            renderedPageWidthPx = v.width.toFloat()
-                                        }
+                                        .onLoad { _ -> isLoading = false }
                                         .onError { isLoading = false }
                                         .enableSwipe(true)
                                         .enableDoubletap(true)
                                         .enableAnnotationRendering(true)
+                                        .onDrawAll { canvas, pageWidth, pageHeight, displayedPage ->
+                                            val data = highlightDrawRef.get() ?: return@onDrawAll
+                                            if (data.pageIndex != displayedPage || data.pageWidthPts <= 0f) return@onDrawAll
+                                            val scaleX = pageWidth / data.pageWidthPts
+                                            val scaleY = pageHeight / data.pageHeightPts
+                                            for (rect in data.rects) {
+                                                canvas.drawRect(
+                                                    rect.left * scaleX, rect.top * scaleY,
+                                                    rect.right * scaleX, rect.bottom * scaleY,
+                                                    data.paint,
+                                                )
+                                            }
+                                        }
                                         .load()
                                 }
                             },
@@ -501,26 +562,6 @@ fun PdfViewerScreen(
                         modifier = Modifier.padding(32.dp),
                     )
                 }
-            }
-
-            // ── Keyword highlight overlay ─────────────────────────────────────
-            val h = highlights
-            if (h != null && h.rects.isNotEmpty() && h.pageWidthPts > 0f && renderedPageWidthPx > 0f) {
-                val scale = renderedPageWidthPx / h.pageWidthPts
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .drawWithContent {
-                            drawContent()
-                            for (rect in h.rects) {
-                                drawRect(
-                                    color = AmberAccent.copy(alpha = if (isNightMode) 0.55f else 0.35f),
-                                    topLeft = Offset(rect.left * scale, rect.top * scale),
-                                    size = Size((rect.right - rect.left) * scale, (rect.bottom - rect.top) * scale),
-                                )
-                            }
-                        },
-                )
             }
 
             // ── Zoom controls ─────────────────────────────────────────────────

@@ -9,5 +9,6 @@ data class SearchResult(
     val pageNumber: Int,
     val lineNumber: Int,
     val snippet: String,
-    val isOcr: Boolean
+    val isOcr: Boolean,
+    val folderName: String,
 )
