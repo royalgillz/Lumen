@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -47,6 +48,7 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
     val documents by viewModel.documents.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val isIndexing by viewModel.isIndexing.collectAsState()
+    val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -121,6 +123,32 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
             }
         }
 
+        // Warning banner when a folder's SAF permission has been revoked
+        if (lostPermissionFolders.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(AmberAccent.copy(alpha = 0.15f))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = AmberAccent,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = "${lostPermissionFolders.size} folder${if (lostPermissionFolders.size > 1) "s" else ""} " +
+                        "lost access — remove and re-add using + Add Folder.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
         if (folders.isEmpty() && documents.isEmpty()) {
             LibraryEmptyState(onAdd = { folderPickerLauncher.launch(null) })
         } else {
@@ -132,6 +160,7 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
                     items(folders.toList(), key = { it.toString() }) { uri ->
                         FolderRow(
                             uri = uri,
+                            hasLostPermission = uri in lostPermissionFolders,
                             onRemove = { viewModel.removeFolder(uri) },
                             onReindex = { viewModel.reindexFolder(uri) },
                         )
@@ -141,7 +170,12 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
                 if (documents.isNotEmpty()) {
                     item { SectionHeader("Documents (${documents.size})") }
                     items(documents, key = { it.id }) { doc ->
-                        DocumentRow(doc)
+                        DocumentRow(
+                            doc = doc,
+                            onRetry = if (doc.status == DocumentEntity.STATUS_ERROR) {
+                                { viewModel.retryDocument(doc) }
+                            } else null,
+                        )
                     }
                 }
             }
@@ -217,7 +251,12 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun FolderRow(uri: Uri, onRemove: () -> Unit, onReindex: () -> Unit) {
+private fun FolderRow(
+    uri: Uri,
+    hasLostPermission: Boolean,
+    onRemove: () -> Unit,
+    onReindex: () -> Unit,
+) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -230,26 +269,38 @@ private fun FolderRow(uri: Uri, onRemove: () -> Unit, onReindex: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                Icons.Default.FolderOpen,
+                if (hasLostPermission) Icons.Default.Warning else Icons.Default.FolderOpen,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
+                tint = if (hasLostPermission) AmberAccent else MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(24.dp),
             )
-            Text(
-                text = uri.lastPathSegment ?: uri.toString(),
-                style = MaterialTheme.typography.bodyMedium,
+            Column(
                 modifier = Modifier
                     .weight(1f)
                     .padding(horizontal = 12.dp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            IconButton(onClick = onReindex) {
-                Icon(
-                    Icons.Default.Refresh,
-                    contentDescription = "Re-index folder",
-                    tint = MaterialTheme.colorScheme.primary,
+            ) {
+                Text(
+                    text = uri.lastPathSegment ?: uri.toString(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
+                if (hasLostPermission) {
+                    Text(
+                        text = "Permission lost — remove and re-add",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AmberAccent,
+                    )
+                }
+            }
+            if (!hasLostPermission) {
+                IconButton(onClick = onReindex) {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = "Re-index folder",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             IconButton(onClick = onRemove) {
                 Icon(
@@ -263,7 +314,7 @@ private fun FolderRow(uri: Uri, onRemove: () -> Unit, onReindex: () -> Unit) {
 }
 
 @Composable
-private fun DocumentRow(doc: DocumentEntity) {
+private fun DocumentRow(doc: DocumentEntity, onRetry: (() -> Unit)?) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -301,8 +352,21 @@ private fun DocumentRow(doc: DocumentEntity) {
                     Text(
                         text = statusLabel(doc.status, doc.pageCount),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (doc.status == DocumentEntity.STATUS_ERROR)
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                if (onRetry != null) {
+                    IconButton(onClick = onRetry) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "Retry indexing",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
             }
             if (doc.status == DocumentEntity.STATUS_INDEXING) {
@@ -320,7 +384,7 @@ private fun statusLabel(status: String, pageCount: Int): String = when (status) 
     DocumentEntity.STATUS_INDEXED -> "$pageCount pages indexed"
     DocumentEntity.STATUS_INDEXING -> "Indexing…"
     DocumentEntity.STATUS_ENCRYPTED -> "Encrypted — cannot index"
-    DocumentEntity.STATUS_ERROR -> "Error"
+    DocumentEntity.STATUS_ERROR -> "Failed to index — tap retry to try again"
     else -> "Pending"
 }
 

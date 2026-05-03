@@ -38,6 +38,11 @@ class LibraryViewModel @Inject constructor(
         .map { infos -> infos.any { it.state == WorkInfo.State.RUNNING } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+    // Folders whose SAF URI permission has been revoked (e.g. after a reboot on some devices)
+    val lostPermissionFolders: StateFlow<Set<Uri>> = libraryRepository.folders
+        .map { uris -> uris.filter { !libraryRepository.hasPermissionFor(it) }.toSet() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
     fun addFolder(treeUri: Uri) {
         viewModelScope.launch { addFolderUseCase(treeUri) }
     }
@@ -52,5 +57,17 @@ class LibraryViewModel @Inject constructor(
             ExistingWorkPolicy.REPLACE,
             IndexWorker.buildRequest(treeUri),
         )
+    }
+
+    fun retryDocument(doc: DocumentEntity) {
+        viewModelScope.launch {
+            libraryRepository.resetDocumentStatus(doc.id)
+            val treeUri = doc.treeUri.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } ?: return@launch
+            workManager.enqueueUniqueWork(
+                "index_$treeUri",
+                ExistingWorkPolicy.KEEP,
+                IndexWorker.buildRequest(treeUri),
+            )
+        }
     }
 }

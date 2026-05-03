@@ -23,4 +23,9 @@ class LibraryRepository @Inject constructor(
         documentDao.deleteByTreeUri(treeUri.toString())
         safRepository.removeFolder(treeUri)
     }
+
+    fun hasPermissionFor(uri: Uri): Boolean = safRepository.hasPersistedPermission(uri)
+
+    suspend fun resetDocumentStatus(id: Long) =
+        documentDao.updateStatus(id, DocumentEntity.STATUS_PENDING)
 }

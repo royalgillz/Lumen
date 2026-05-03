@@ -42,6 +42,12 @@ interface DocumentDao {
     @Query("SELECT COUNT(*) FROM documents WHERE status = 'indexed'")
     suspend fun countIndexed(): Int
 
+    @Query("SELECT COUNT(*) FROM documents WHERE status = 'indexed'")
+    fun observeIndexedCount(): Flow<Int>
+
     @Query("SELECT * FROM documents WHERE status = 'pending' OR status = 'error'")
     suspend fun getPendingOrError(): List<DocumentEntity>
+
+    @Query("DELETE FROM documents")
+    suspend fun deleteAll()
 }
