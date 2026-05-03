@@ -262,9 +262,9 @@ private fun PageContent(page: OnboardingPage, currentPage: Int) {
                 contentAlignment = Alignment.Center,
             ) {
                 when (page.iconKind) {
-                    "privacy" -> PrivacyIcon(MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
-                    "folder" -> FolderIcon(MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
-                    else -> SearchDocIcon(MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
+                    "privacy" -> PrivacyIcon(MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(56.dp))
+                    "folder" -> FolderIcon(MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(56.dp))
+                    else -> SearchDocIcon(MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(56.dp))
                 }
             }
         }

@@ -25,6 +25,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,10 @@ import com.lumen.app.ui.icons.TrashIcon
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
+    val indexedCount by viewModel.indexedCount.collectAsState()
+    val totalPages by viewModel.totalPages.collectAsState()
+    val totalWords by viewModel.totalWords.collectAsState()
+    val ocrPages by viewModel.ocrPages.collectAsState()
 
     if (showDeleteConfirm) {
         AlertDialog(
@@ -125,6 +130,15 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         PrivacyAuditCard()
         Spacer(Modifier.height(16.dp))
 
+        SectionLabel("Index Health")
+        IndexHealthCard(
+            indexedCount = indexedCount,
+            totalPages = totalPages,
+            totalWords = totalWords,
+            ocrPages = ocrPages,
+        )
+        Spacer(Modifier.height(16.dp))
+
         SectionLabel("Data")
         DataCard(onDeleteIndex = { showDeleteConfirm = true })
         Spacer(Modifier.height(16.dp))
@@ -142,6 +156,51 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
         )
     }
+}
+
+@Composable
+private fun IndexHealthCard(
+    indexedCount: Int,
+    totalPages: Int,
+    totalWords: Int,
+    ocrPages: Int,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 1.dp,
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Library index", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(10.dp))
+            MetricRow("Indexed PDFs", indexedCount.toString())
+            MetricRow("Total pages", formatCount(totalPages))
+            MetricRow("Total words", formatCount(totalWords))
+            MetricRow("OCR coverage", if (totalPages > 0) "${ocrPages * 100 / totalPages}%" else "0%")
+        }
+    }
+}
+
+@Composable
+private fun MetricRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+private fun formatCount(value: Int): String = when {
+    value >= 1_000_000 -> String.format(java.util.Locale.US, "%.1fM", value / 1_000_000f)
+    value >= 1_000 -> String.format(java.util.Locale.US, "%.1fk", value / 1_000f)
+    else -> value.toString()
 }
 
 @Composable

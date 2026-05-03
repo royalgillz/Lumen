@@ -1,23 +1,18 @@
 package com.lumen.app.ui.navigation
 
 import android.net.Uri
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
@@ -38,6 +33,7 @@ import com.lumen.app.ui.search.SearchScreen
 import com.lumen.app.ui.settings.SettingsScreen
 import androidx.compose.material3.MaterialTheme
 import com.lumen.app.ui.viewer.PdfViewerScreen
+import com.lumen.app.ui.theme.AmberAccent
 
 sealed class Screen(val route: String) {
     data object Onboarding : Screen("onboarding")
@@ -73,50 +69,52 @@ private val TAB_ROUTES = TABS.map { it.screen.route }.toSet()
 @Composable
 fun LumenNavGraph(
     startDestination: String = Screen.Search.route,
+    externalPdfUri: String? = null,
     navController: NavHostController = rememberNavController(),
 ) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val handledExternalUri = remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(externalPdfUri) {
+        val uri = externalPdfUri ?: return@LaunchedEffect
+        if (handledExternalUri.value == uri) return@LaunchedEffect
+        handledExternalUri.value = uri
+        val filename = runCatching { Uri.parse(uri).lastPathSegment }.getOrNull().orEmpty().ifBlank { "PDF" }
+        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename, keyword = "")) {
+            launchSingleTop = true
+        }
+    }
 
     Scaffold(
         bottomBar = {
             if (currentRoute in TAB_ROUTES) {
-                BoxWithConstraints {
-                    val selectedIndex = TABS.indexOfFirst { it.screen.route == currentRoute }.coerceAtLeast(0)
-                    val tabWidth = maxWidth / TABS.size
-                    val indicatorOffset by animateDpAsState(
-                        targetValue = tabWidth * selectedIndex + (tabWidth / 2) - 3.dp,
-                        animationSpec = tween(durationMillis = 260),
-                        label = "nav-indicator"
-                    )
-                    NavigationBar {
-                        TABS.forEach { tab ->
-                            val selected = navBackStackEntry?.destination
-                                ?.hierarchy?.any { it.route == tab.screen.route } == true
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = {
-                                    navController.navigate(tab.screen.route) {
-                                        popUpTo(navController.graph.findStartDestination().id) {
-                                            saveState = true
-                                        }
-                                        launchSingleTop = true
-                                        restoreState = true
+                NavigationBar {
+                    TABS.forEach { tab ->
+                        val selected = navBackStackEntry?.destination
+                            ?.hierarchy?.any { it.route == tab.screen.route } == true
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = {
+                                navController.navigate(tab.screen.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        saveState = true
                                     }
-                                },
-                                icon = { tab.icon(selected) },
-                                label = { Text(tab.label) },
-                            )
-                        }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = { tab.icon(selected) },
+                            label = { Text(tab.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                indicatorColor = AmberAccent.copy(alpha = 0.18f),
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = AmberAccent,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ),
+                        )
                     }
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(start = indicatorOffset, top = 6.dp)
-                            .size(6.dp)
-                            .clip(androidx.compose.foundation.shape.CircleShape)
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
                 }
             }
         }
@@ -151,7 +149,13 @@ fun LumenNavGraph(
                     },
                 )
             }
-            composable(Screen.Library.route) { LibraryScreen() }
+            composable(Screen.Library.route) {
+                LibraryScreen(
+                    onOpenDocument = { uri, filename ->
+                        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename, keyword = ""))
+                    }
+                )
+            }
             composable(Screen.Settings.route) { SettingsScreen() }
             composable(
                 route = PDF_VIEWER_ROUTE,

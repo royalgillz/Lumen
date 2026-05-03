@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
@@ -77,7 +78,10 @@ import java.util.concurrent.TimeUnit
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
+fun LibraryScreen(
+    viewModel: LibraryViewModel = hiltViewModel(),
+    onOpenDocument: (uri: String, filename: String) -> Unit = { _, _ -> },
+) {
     val documents by viewModel.documents.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val isIndexing by viewModel.isIndexing.collectAsState()
@@ -108,6 +112,11 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
                     val treeUri = selectedDocument!!.treeUri
                         .takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
                     if (treeUri != null) viewModel.reindexFolder(treeUri)
+                    viewModel.hideDocumentDetail()
+                },
+                onOpenPdf = {
+                    val doc = selectedDocument ?: return@DocumentDetailSheet
+                    onOpenDocument(doc.uri, doc.filename)
                     viewModel.hideDocumentDetail()
                 },
                 onDismiss = { viewModel.hideDocumentDetail() },
@@ -199,6 +208,18 @@ fun LibraryScreen(viewModel: LibraryViewModel = hiltViewModel()) {
                         item { Spacer(Modifier.height(8.dp)) }
                     }
                     if (documents.isNotEmpty()) {
+                        val failedOrEncrypted = documents.filter {
+                            it.status == DocumentEntity.STATUS_ERROR || it.status == DocumentEntity.STATUS_ENCRYPTED
+                        }
+                        if (failedOrEncrypted.isNotEmpty()) {
+                            item {
+                                ErrorCenterCard(
+                                    documents = failedOrEncrypted,
+                                    onRetry = { doc -> viewModel.retryDocument(doc) },
+                                    onOpen = { doc -> onOpenDocument(doc.uri, doc.filename) },
+                                )
+                            }
+                        }
                         item {
                             Row(
                                 modifier = Modifier
@@ -363,7 +384,7 @@ private fun LibraryStats(
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 1.dp,
     ) {
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
@@ -377,9 +398,9 @@ private fun LibraryStats(
             }
 
             if (totalPages > 0) {
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
@@ -401,7 +422,7 @@ private fun StatItem(count: Int, label: String, useAccent: Boolean = false) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = count.toString(),
-            style = MaterialTheme.typography.headlineMedium,
+            style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
             color = if (useAccent) AmberAccent else MaterialTheme.colorScheme.onSurface,
         )
@@ -411,7 +432,7 @@ private fun StatItem(count: Int, label: String, useAccent: Boolean = false) {
 
 @Composable
 private fun StatDivider() {
-    Box(modifier = Modifier.width(1.dp).height(40.dp).background(MaterialTheme.colorScheme.outlineVariant))
+    Box(modifier = Modifier.width(1.dp).height(36.dp).background(MaterialTheme.colorScheme.outlineVariant))
 }
 
 @Composable
@@ -419,12 +440,108 @@ private fun MiniStat(value: String, label: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = value,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.SemiBold,
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.primary,
         )
         Text(text = label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ErrorCenterCard(
+    documents: List<DocumentEntity>,
+    onRetry: (DocumentEntity) -> Unit,
+    onOpen: (DocumentEntity) -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 1.dp,
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Error Center (${documents.size})",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.error,
+            )
+            documents.take(4).forEach { doc ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = doc.filename,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = if (doc.status == DocumentEntity.STATUS_ENCRYPTED) "Encrypted" else "Indexing failed",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Surface(
+                        onClick = { onOpen(doc) },
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                    ) {
+                        Text(
+                            text = "Open",
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    if (doc.status == DocumentEntity.STATUS_ERROR) {
+                        Surface(
+                            onClick = { onRetry(doc) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                        ) {
+                            Text(
+                                text = "Retry",
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
+                    } else {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                        ) {
+                            Text(
+                                text = "Encrypted",
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            if (documents.size > 4) {
+                Text(
+                    text = "+${documents.size - 4} more",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -626,6 +743,7 @@ private fun DocumentDetailSheet(
     doc: DocumentEntity,
     ocrPageCount: Int,
     onReindex: () -> Unit,
+    onOpenPdf: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     Column(
@@ -671,6 +789,29 @@ private fun DocumentDetailSheet(
 
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Surface(
+                onClick = onOpenPdf,
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                    Text(
+                        "Open PDF",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+            }
             Surface(
                 onClick = onReindex,
                 shape = RoundedCornerShape(8.dp),

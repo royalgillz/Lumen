@@ -16,6 +16,6 @@ class SearchUseCase @Inject constructor(
         if (trimmed.length < 2) return SearchRepository.Output(emptyList(), false)
         val query = FtsQuerySanitizer.sanitize(trimmed)
             ?: return SearchRepository.Output(emptyList(), false)
-        return searchRepository.search(query, filters)
+        return searchRepository.search(trimmed, query, filters)
     }
 }

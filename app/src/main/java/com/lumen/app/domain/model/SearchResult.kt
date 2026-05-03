@@ -11,4 +11,5 @@ data class SearchResult(
     val snippet: String,
     val isOcr: Boolean,
     val folderName: String,
+    val isFilenameMatch: Boolean = false,
 )

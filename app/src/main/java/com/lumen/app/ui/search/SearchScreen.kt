@@ -148,6 +148,21 @@ fun SearchScreen(
             onFilterClick = { showFilterSheet = true },
         )
 
+        ActiveFiltersRow(
+            filters = filters,
+            availableFolders = availableFolders,
+            onRemoveFolder = { folderId ->
+                viewModel.filters.value = filters.copy(folderIds = filters.folderIds - folderId)
+            },
+            onToggleOcrOnly = {
+                viewModel.filters.value = filters.copy(ocrOnly = !filters.ocrOnly)
+            },
+            onResetSort = {
+                viewModel.filters.value = filters.copy(sortOrder = SortOrder.RELEVANCE)
+            },
+            onClearAll = { viewModel.filters.value = SearchFilters() },
+        )
+
         if (isIndexing) {
             Row(
                 modifier = Modifier
@@ -284,9 +299,11 @@ private fun SearchHeader(
                 modifier = Modifier
                     .size(46.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(
-                        if (activeFilterCount > 0) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surfaceVariant
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(
+                        width = if (activeFilterCount > 0) 1.dp else 0.dp,
+                        color = if (activeFilterCount > 0) AmberAccent.copy(alpha = 0.55f) else Color.Transparent,
+                        shape = RoundedCornerShape(12.dp),
                     )
                     .clickable(onClick = onFilterClick),
                 contentAlignment = Alignment.Center,
@@ -294,7 +311,7 @@ private fun SearchHeader(
                 Icon(
                     Icons.Default.FilterList,
                     contentDescription = "Filters",
-                    tint = if (activeFilterCount > 0) MaterialTheme.colorScheme.primary
+                    tint = if (activeFilterCount > 0) AmberAccent
                            else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
@@ -520,7 +537,7 @@ fun ResultRow(
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            text = "p. ${result.pageNumber + 1}",
+                            text = if (result.isFilenameMatch) "name" else "p. ${result.pageNumber + 1}",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.SemiBold,
@@ -535,12 +552,16 @@ fun ResultRow(
                     Spacer(Modifier.height(4.dp))
 
                     Text(
-                        text = buildHighlightedSnippet(
-                            query = query,
-                            snippet = result.snippet,
-                            highlightColor = AmberAccent.copy(alpha = 0.18f),
-                            highlightTextColor = MaterialTheme.colorScheme.onBackground,
-                        ),
+                        text = if (result.isFilenameMatch) {
+                            androidx.compose.ui.text.AnnotatedString(result.snippet)
+                        } else {
+                            buildHighlightedSnippet(
+                                query = query,
+                                snippet = result.snippet,
+                                highlightColor = AmberAccent.copy(alpha = 0.18f),
+                                highlightTextColor = MaterialTheme.colorScheme.onBackground,
+                            )
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         lineHeight = 19.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -712,6 +733,61 @@ private fun SearchFilterSheet(
 
 private fun folderIdFromTreeUri(uri: Uri): String =
     runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrDefault(uri.toString())
+
+private fun folderLabel(folderId: String, availableFolders: Set<Uri>): String =
+    availableFolders.firstOrNull { folderIdFromTreeUri(it) == folderId }?.lastPathSegment ?: folderId
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ActiveFiltersRow(
+    filters: SearchFilters,
+    availableFolders: Set<Uri>,
+    onRemoveFolder: (String) -> Unit,
+    onToggleOcrOnly: () -> Unit,
+    onResetSort: () -> Unit,
+    onClearAll: () -> Unit,
+) {
+    if (filters == SearchFilters()) return
+
+    FlowRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        filters.folderIds.forEach { folderId ->
+            FilterChip(
+                selected = true,
+                onClick = { onRemoveFolder(folderId) },
+                label = { Text("Folder: ${folderLabel(folderId, availableFolders)}") },
+                leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp)) },
+            )
+        }
+
+        if (filters.ocrOnly) {
+            FilterChip(
+                selected = true,
+                onClick = onToggleOcrOnly,
+                label = { Text("OCR only") },
+            )
+        }
+
+        if (filters.sortOrder != SortOrder.RELEVANCE) {
+            FilterChip(
+                selected = true,
+                onClick = onResetSort,
+                label = { Text("Sort: ${filters.sortOrder.displayName}") },
+            )
+        }
+
+        FilterChip(
+            selected = false,
+            onClick = onClearAll,
+            label = { Text("Clear all") },
+        )
+    }
+}
 
 @Composable
 private fun SearchEmptyState(indexedCount: Int, onOpenLibrary: () -> Unit) {

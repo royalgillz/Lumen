@@ -118,7 +118,7 @@ fun TrashIcon(color: Color, modifier: Modifier = Modifier) {
 @Composable
 fun LumenBrandIcon(modifier: Modifier = Modifier) {
     Image(
-        painter = painterResource(id = R.drawable.ic_launcher_icon),
+        painter = painterResource(id = R.drawable.lumen_icon_48),
         contentDescription = "Lumen logo",
         modifier = modifier.size(22.dp),
     )

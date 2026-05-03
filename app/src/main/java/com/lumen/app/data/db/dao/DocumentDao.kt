@@ -50,4 +50,22 @@ interface DocumentDao {
 
     @Query("DELETE FROM documents")
     suspend fun deleteAll()
+
+    @Query("""
+        SELECT id, uri, filename, treeUri, indexedAt
+        FROM documents
+        WHERE status = 'indexed'
+          AND instr(lower(filename), lower(:query)) > 0
+        ORDER BY filename
+        LIMIT :limit
+    """)
+    suspend fun searchByFilename(query: String, limit: Int = 200): List<FilenameSearchRow>
 }
+
+data class FilenameSearchRow(
+    val id: Long,
+    val uri: String,
+    val filename: String,
+    val treeUri: String,
+    val indexedAt: Long?,
+)

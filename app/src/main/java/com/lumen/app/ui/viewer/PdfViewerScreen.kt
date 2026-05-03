@@ -10,6 +10,7 @@ import android.net.Uri
 import android.view.View
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
@@ -84,6 +85,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -151,6 +153,9 @@ fun PdfViewerScreen(
     var isNightMode by remember { mutableStateOf(false) }
     var showPageJump by remember { mutableStateOf(false) }
     var pageJumpInput by remember { mutableStateOf("") }
+    var showPasswordPrompt by remember { mutableStateOf(false) }
+    var passwordInput by remember { mutableStateOf("") }
+    var activePdfPassword by remember { mutableStateOf<String?>(null) }
 
     // ── Highlight draw data shared with PDFView's onDrawAll callback ──────────
     val highlightDrawRef = remember { AtomicReference<HighlightDrawData?>(null) }
@@ -195,15 +200,23 @@ fun PdfViewerScreen(
     val activeHighlightQuery = if (isViewerSearchActive) viewerSearchText.trim() else keyword.trim()
     val latestHighlightQuery by rememberUpdatedState(activeHighlightQuery)
     val viewerSearchQuery = viewerSearchText.trim()
+    val viewerChromeColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.96f)
+    val statusBarScrimColor = MaterialTheme.colorScheme.surfaceVariant
+    val statusBarColor = statusBarScrimColor.toArgb()
     var topBarHeightPx by remember { mutableIntStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val topBarHeightDp = with(density) { topBarHeightPx.toDp() }
-    val topChromePadding = if (showControls || isViewerSearchActive) topBarHeightDp else 0.dp
+    val topChromePadding by animateDpAsState(
+        targetValue = if (showControls || isViewerSearchActive) topBarHeightDp else 0.dp,
+        animationSpec = tween(180),
+        label = "viewer_top_chrome_padding",
+    )
 
     // Keep status bar icon contrast aligned with the app theme.
     if (activity != null) {
         SideEffect {
             val window = activity.window
+            window.statusBarColor = statusBarColor
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !isDarkTheme
         }
         DisposableEffect(Unit) {
@@ -290,6 +303,32 @@ fun PdfViewerScreen(
     }
 
     // ── Page jump dialog ──────────────────────────────────────────────────────
+    if (showPasswordPrompt) {
+        AlertDialog(
+            onDismissRequest = { showPasswordPrompt = false },
+            title = { Text("Encrypted PDF") },
+            text = {
+                TextField(
+                    value = passwordInput,
+                    onValueChange = { passwordInput = it },
+                    label = { Text("Enter PDF password") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    activePdfPassword = passwordInput.ifBlank { null }
+                    showPasswordPrompt = false
+                    isLoading = true
+                }) { Text("Open") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPasswordPrompt = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // ── Page jump dialog ──────────────────────────────────────────────────────
     if (showPageJump && pageCount.intValue > 0) {
         AlertDialog(
             onDismissRequest = { showPageJump = false },
@@ -333,7 +372,7 @@ fun PdfViewerScreen(
         ) {
             if (parsedUri != null) {
                 // key() forces full rebuild of PDFView when scroll mode changes
-                key(scrollHorizontal) {
+                key(scrollHorizontal, activePdfPassword.orEmpty()) {
                     val (stream, openErrorMsg) = remember(parsedUri) {
                         try {
                             Pair(context.contentResolver.openInputStream(parsedUri), null)
@@ -354,9 +393,13 @@ fun PdfViewerScreen(
                                 PDFView(ctx, null).also { v ->
                                     pdfView = v
                                     isLoading = true
-                                    v.fromStream(stream)
+                                    val config = v.fromStream(stream)
                                         .defaultPage(displayPage.intValue)
                                         .swipeHorizontal(scrollHorizontal)
+                                    if (!activePdfPassword.isNullOrBlank()) {
+                                        config.password(activePdfPassword)
+                                    }
+                                    config
                                         .linkHandler { event ->
                                             handlePdfLinkTap(
                                                 event = event,
@@ -387,8 +430,19 @@ fun PdfViewerScreen(
                                                 }
                                             }
                                         })
-                                        .onLoad { _ -> isLoading = false }
-                                        .onError { isLoading = false }
+                                        .onLoad { _ ->
+                                            isLoading = false
+                                            if (showPasswordPrompt) showPasswordPrompt = false
+                                        }
+                                        .onError { throwable ->
+                                            isLoading = false
+                                            val message = throwable.message.orEmpty()
+                                            val encrypted = message.contains("password", ignoreCase = true) ||
+                                                message.contains("encrypted", ignoreCase = true)
+                                            if (encrypted) {
+                                                showPasswordPrompt = true
+                                            }
+                                        }
                                         .enableSwipe(true)
                                         .enableDoubletap(true)
                                         .enableAnnotationRendering(true)
@@ -467,6 +521,15 @@ fun PdfViewerScreen(
             SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 90.dp))
         }
 
+        // Always keep the status-bar zone opaque so PDF content doesn't bleed/blur under it.
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .background(statusBarScrimColor)
+        )
+
         AnimatedVisibility(
             visible = showControls || isViewerSearchActive,
             modifier = Modifier
@@ -479,7 +542,7 @@ fun PdfViewerScreen(
                     .fillMaxWidth()
                     .onSizeChanged { topBarHeightPx = it.height }
                     .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+                color = viewerChromeColor,
                 shadowElevation = 4.dp,
             ) {
                 Column(modifier = Modifier.padding(vertical = 8.dp)) {
