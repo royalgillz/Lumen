@@ -792,10 +792,13 @@ private fun ActiveFiltersRow(
 @Composable
 private fun SearchEmptyState(indexedCount: Int, onOpenLibrary: () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 32.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp, vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.Top,
     ) {
+        Spacer(Modifier.height(72.dp))
         Box(
             modifier = Modifier.size(72.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(22.dp)),
             contentAlignment = Alignment.Center,

@@ -156,6 +156,8 @@ fun PdfViewerScreen(
     var showPasswordPrompt by remember { mutableStateOf(false) }
     var passwordInput by remember { mutableStateOf("") }
     var activePdfPassword by remember { mutableStateOf<String?>(null) }
+    var pdfReloadToken by remember { mutableIntStateOf(0) }
+    var runtimeOpenError by remember { mutableStateOf<String?>(null) }
 
     // ── Highlight draw data shared with PDFView's onDrawAll callback ──────────
     val highlightDrawRef = remember { AtomicReference<HighlightDrawData?>(null) }
@@ -318,6 +320,8 @@ fun PdfViewerScreen(
             confirmButton = {
                 TextButton(onClick = {
                     activePdfPassword = passwordInput.ifBlank { null }
+                    pdfReloadToken++
+                    runtimeOpenError = null
                     showPasswordPrompt = false
                     isLoading = true
                 }) { Text("Open") }
@@ -372,8 +376,8 @@ fun PdfViewerScreen(
         ) {
             if (parsedUri != null) {
                 // key() forces full rebuild of PDFView when scroll mode changes
-                key(scrollHorizontal, activePdfPassword.orEmpty()) {
-                    val (stream, openErrorMsg) = remember(parsedUri) {
+                key(scrollHorizontal, activePdfPassword.orEmpty(), pdfReloadToken) {
+                    val (stream, openErrorMsg) = remember(parsedUri, pdfReloadToken) {
                         try {
                             Pair(context.contentResolver.openInputStream(parsedUri), null)
                         } catch (_: SecurityException) {
@@ -387,79 +391,94 @@ fun PdfViewerScreen(
 
                     DisposableEffect(stream) { onDispose { stream?.close() } }
 
-                    if (stream != null) {
+                    if (stream != null && runtimeOpenError == null) {
                         AndroidView(
                             factory = { ctx ->
                                 PDFView(ctx, null).also { v ->
                                     pdfView = v
                                     isLoading = true
-                                    val config = v.fromStream(stream)
-                                        .defaultPage(displayPage.intValue)
-                                        .swipeHorizontal(scrollHorizontal)
-                                    if (!activePdfPassword.isNullOrBlank()) {
-                                        config.password(activePdfPassword)
-                                    }
-                                    config
-                                        .linkHandler { event ->
-                                            handlePdfLinkTap(
-                                                event = event,
-                                                context = ctx,
-                                                pdfView = v,
-                                                onExternalLinkError = {
-                                                    showControls = true
-                                                    controlsTouchTick++
-                                                },
-                                            )
+                                    runCatching {
+                                        val config = v.fromStream(stream)
+                                            .defaultPage(displayPage.intValue)
+                                            .swipeHorizontal(scrollHorizontal)
+                                        if (!activePdfPassword.isNullOrBlank()) {
+                                            config.password(activePdfPassword)
                                         }
-                                        .onTap {
-                                            showControls = !showControls
-                                            if (!showControls) {
-                                                showBrightnessSlider = false
-                                                isViewerSearchActive = false
-                                            }
-                                            controlsTouchTick++
-                                            true
-                                        }
-                                        .onPageChange(object : OnPageChangeListener {
-                                            override fun onPageChanged(page: Int, count: Int) {
-                                                displayPage.intValue = page
-                                                pageCount.intValue = count
-                                                viewModel.saveLastPage(uri, page)
-                                                if (latestHighlightQuery.isNotBlank()) {
-                                                    viewModel.loadHighlights(uri, page, latestHighlightQuery)
-                                                }
-                                            }
-                                        })
-                                        .onLoad { _ ->
-                                            isLoading = false
-                                            if (showPasswordPrompt) showPasswordPrompt = false
-                                        }
-                                        .onError { throwable ->
-                                            isLoading = false
-                                            val message = throwable.message.orEmpty()
-                                            val encrypted = message.contains("password", ignoreCase = true) ||
-                                                message.contains("encrypted", ignoreCase = true)
-                                            if (encrypted) {
-                                                showPasswordPrompt = true
-                                            }
-                                        }
-                                        .enableSwipe(true)
-                                        .enableDoubletap(true)
-                                        .enableAnnotationRendering(true)
-                                        .onDrawAll { canvas, pageWidth, pageHeight, displayedPage ->
-                                            val data = highlightDrawRef.get() ?: return@onDrawAll
-                                            if (data.pageIndex != displayedPage || data.pageWidthPts <= 0f) return@onDrawAll
-                                            val scaleX = pageWidth / data.pageWidthPts
-                                            val scaleY = pageHeight / data.pageHeightPts
-                                            for (rect in data.rects) {
-                                                canvas.drawRect(
-                                                    rect.left * scaleX, rect.top * scaleY,
-                                                    rect.right * scaleX, rect.bottom * scaleY,
-                                                    data.paint,
+                                        config
+                                            .linkHandler { event ->
+                                                handlePdfLinkTap(
+                                                    event = event,
+                                                    context = ctx,
+                                                    pdfView = v,
+                                                    onExternalLinkError = {
+                                                        showControls = true
+                                                        controlsTouchTick++
+                                                    },
                                                 )
                                             }
+                                            .onTap {
+                                                showControls = !showControls
+                                                if (!showControls) {
+                                                    showBrightnessSlider = false
+                                                    isViewerSearchActive = false
+                                                }
+                                                controlsTouchTick++
+                                                true
+                                            }
+                                            .onPageChange(object : OnPageChangeListener {
+                                                override fun onPageChanged(page: Int, count: Int) {
+                                                    displayPage.intValue = page
+                                                    pageCount.intValue = count
+                                                    viewModel.saveLastPage(uri, page)
+                                                    if (latestHighlightQuery.isNotBlank()) {
+                                                        viewModel.loadHighlights(uri, page, latestHighlightQuery)
+                                                    }
+                                                }
+                                            })
+                                            .onLoad { _ ->
+                                                isLoading = false
+                                                runtimeOpenError = null
+                                                if (showPasswordPrompt) showPasswordPrompt = false
+                                            }
+                                            .onError { throwable ->
+                                                isLoading = false
+                                                val message = throwable.message.orEmpty()
+                                                val encrypted = message.contains("password", ignoreCase = true) ||
+                                                    message.contains("encrypted", ignoreCase = true)
+                                                if (encrypted) {
+                                                    showPasswordPrompt = true
+                                                } else {
+                                                    runtimeOpenError = if (message.isNotBlank()) message else "Unable to open this PDF."
+                                                }
+                                            }
+                                            .enableSwipe(true)
+                                            .enableDoubletap(true)
+                                            .enableAnnotationRendering(true)
+                                            .onDrawAll { canvas, pageWidth, pageHeight, displayedPage ->
+                                                val data = highlightDrawRef.get() ?: return@onDrawAll
+                                                if (data.pageIndex != displayedPage || data.pageWidthPts <= 0f) return@onDrawAll
+                                                val scaleX = pageWidth / data.pageWidthPts
+                                                val scaleY = pageHeight / data.pageHeightPts
+                                                for (rect in data.rects) {
+                                                    canvas.drawRect(
+                                                        rect.left * scaleX, rect.top * scaleY,
+                                                        rect.right * scaleX, rect.bottom * scaleY,
+                                                        data.paint,
+                                                    )
+                                                }
+                                            }
+                                            .load()
+                                    }.onFailure { throwable ->
+                                        isLoading = false
+                                        val message = throwable.message.orEmpty()
+                                        val encrypted = message.contains("password", ignoreCase = true) ||
+                                            message.contains("encrypted", ignoreCase = true)
+                                        if (encrypted) {
+                                            showPasswordPrompt = true
+                                        } else {
+                                            runtimeOpenError = if (message.isNotBlank()) message else "Unable to open this PDF."
                                         }
-                                        .load()
+                                    }
                                 }
                             },
                             update = { v ->
@@ -474,7 +493,7 @@ fun PdfViewerScreen(
                     } else {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text(
-                                text = openErrorMsg ?: "Unable to open this PDF.",
+                                text = runtimeOpenError ?: openErrorMsg ?: "Unable to open this PDF.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center,

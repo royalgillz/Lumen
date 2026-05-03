@@ -48,7 +48,7 @@ class MainActivity : ComponentActivity() {
     private fun extractPdfUri(intent: Intent?): String? {
         if (intent?.action != Intent.ACTION_VIEW) return null
         val data: Uri = intent.data ?: return null
-        val mime = contentResolver.getType(data).orEmpty()
+        val mime = runCatching { contentResolver.getType(data) }.getOrNull().orEmpty()
         val path = data.toString()
         val looksLikePdf = mime.equals("application/pdf", ignoreCase = true) ||
             path.endsWith(".pdf", ignoreCase = true)
