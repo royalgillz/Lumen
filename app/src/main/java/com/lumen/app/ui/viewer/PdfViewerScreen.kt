@@ -60,6 +60,8 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -169,8 +171,9 @@ fun PdfViewerScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     val scrollHorizontal by viewModel.scrollHorizontal.collectAsState()
-    LaunchedEffect(showControls, controlsTouchTick) {
-        if (showControls && !isViewerSearchActive) {
+    LaunchedEffect(showControls, controlsTouchTick, runtimeOpenError) {
+        // Don't auto-hide while an error is shown — the toolbar is the only way back
+        if (showControls && !isViewerSearchActive && runtimeOpenError == null) {
             delay(4200)
             showControls = false
             showBrightnessSlider = false
@@ -385,6 +388,16 @@ fun PdfViewerScreen(
 
                     DisposableEffect(stream) { onDispose { stream?.close() } }
 
+                    // Hoist stream-open failures into runtimeOpenError so the toolbar
+                    // stays visible and the spinner is cleared correctly.
+                    LaunchedEffect(openErrorMsg) {
+                        if (openErrorMsg != null) {
+                            runtimeOpenError = openErrorMsg
+                            isLoading = false
+                            showControls = true
+                        }
+                    }
+
                     if (stream != null && runtimeOpenError == null) {
                         AndroidView(
                             factory = { ctx ->
@@ -445,6 +458,7 @@ fun PdfViewerScreen(
                                                     showPasswordPrompt = true
                                                 } else {
                                                     runtimeOpenError = userMessageForPdfLoadFailure(throwable)
+                                                    showControls = true
                                                 }
                                             }
                                             .enableSwipe(true)
@@ -472,6 +486,7 @@ fun PdfViewerScreen(
                                             showPasswordPrompt = true
                                         } else {
                                             runtimeOpenError = userMessageForPdfLoadFailure(throwable)
+                                            showControls = true
                                         }
                                     }
                                 }
@@ -479,45 +494,46 @@ fun PdfViewerScreen(
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = runtimeOpenError ?: openErrorMsg ?: "Unable to open this PDF.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(32.dp),
-                            )
-                        }
+                        val errorText = runtimeOpenError ?: openErrorMsg ?: "Unable to open this PDF."
+                        val canRetry = errorText.contains("too much memory", ignoreCase = true)
+                        PdfErrorScreen(
+                            message = errorText,
+                            onBack = onBack,
+                            onRetry = if (canRetry) {
+                                {
+                                    runtimeOpenError = null
+                                    pdfReloadToken++
+                                    isLoading = true
+                                }
+                            } else null,
+                        )
                     }
                 }
             } else {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "Unable to open this PDF, the link is invalid.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(32.dp),
-                    )
-                }
+                PdfErrorScreen(
+                    message = "Unable to open this PDF — the link is invalid.",
+                    onBack = onBack,
+                )
             }
 
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                ZoomButton(icon = { Icon(Icons.Default.Add, contentDescription = "Zoom in") }) {
-                    pdfView?.let { v -> v.zoomWithAnimation((v.zoom * ZOOM_STEP).coerceAtMost(ZOOM_MAX)) }
-                    showControls = true
-                    controlsTouchTick++
-                }
-                ZoomButton(icon = { Icon(Icons.Default.Remove, contentDescription = "Zoom out") }) {
-                    pdfView?.let { v -> v.zoomWithAnimation((v.zoom / ZOOM_STEP).coerceAtLeast(ZOOM_MIN)) }
-                    showControls = true
-                    controlsTouchTick++
+            if (runtimeOpenError == null) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    ZoomButton(icon = { Icon(Icons.Default.Add, contentDescription = "Zoom in") }) {
+                        pdfView?.let { v -> v.zoomWithAnimation((v.zoom * ZOOM_STEP).coerceAtMost(ZOOM_MAX)) }
+                        showControls = true
+                        controlsTouchTick++
+                    }
+                    ZoomButton(icon = { Icon(Icons.Default.Remove, contentDescription = "Zoom out") }) {
+                        pdfView?.let { v -> v.zoomWithAnimation((v.zoom / ZOOM_STEP).coerceAtLeast(ZOOM_MIN)) }
+                        showControls = true
+                        controlsTouchTick++
+                    }
                 }
             }
 
@@ -760,6 +776,44 @@ private fun handlePdfLinkTap(
     }
     // Keep internal PDF link behavior (jump to destination/page) intact.
     DefaultLinkHandler(pdfView).handleLinkEvent(event)
+}
+
+@Composable
+private fun PdfErrorScreen(
+    message: String,
+    onBack: () -> Unit,
+    onRetry: (() -> Unit)? = null,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(28.dp))
+        if (onRetry != null) {
+            Button(
+                onClick = onRetry,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Try again")
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        OutlinedButton(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Go back")
+        }
+    }
 }
 
 @Composable
