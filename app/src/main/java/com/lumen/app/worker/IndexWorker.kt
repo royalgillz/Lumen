@@ -70,8 +70,13 @@ class IndexWorker @AssistedInject constructor(
         pdfs.forEachIndexed { index, pdf ->
             setProgress(workDataOf(KEY_PROGRESS to index, KEY_TOTAL to pdfs.size))
             setForeground(buildForegroundInfo("${index + 1} / ${pdfs.size}: ${pdf.filename}"))
+            val timeoutMs = when {
+                pdf.sizeBytes > 50 * 1024 * 1024 -> 30 * 60 * 1000L
+                pdf.sizeBytes > 10 * 1024 * 1024 -> 20 * 60 * 1000L
+                else -> 10 * 60 * 1000L
+            }
             val completed = try {
-                withTimeoutOrNull(10 * 60 * 1000L) { indexPdf(pdf, folderUri) } != null
+                withTimeoutOrNull(timeoutMs) { indexPdf(pdf, folderUri) } != null
             } catch (_: Exception) {
                 false
             }
@@ -122,12 +127,16 @@ class IndexWorker @AssistedInject constructor(
         val ocrPageIndices = pages.filter { it.needsOcr }.map { it.index }
         if (ocrPageIndices.isNotEmpty()) {
             pdfPageRenderer.renderPagesInSession(pdf.uri, ocrPageIndices) { pageIndex, bitmap ->
-                val mlText = mlKitOcrEngine.recognizeText(bitmap)
-                ocrTexts[pageIndex] = if (mlText.length >= MIN_OCR_CHARS) {
-                    mlText
-                } else {
-                    val tessText = tesseractOcrEngine.recognizeText(bitmap)
-                    if (tessText.length > mlText.length) tessText else mlText
+                try {
+                    val mlText = mlKitOcrEngine.recognizeText(bitmap)
+                    ocrTexts[pageIndex] = if (mlText.length >= MIN_OCR_CHARS) {
+                        mlText
+                    } else {
+                        val tessText = tesseractOcrEngine.recognizeText(bitmap)
+                        if (tessText.length > mlText.length) tessText else mlText
+                    }
+                } catch (_: Exception) {
+                    // Page OCR failed; PdfBox text (or empty string) will be used instead
                 }
             }
         }

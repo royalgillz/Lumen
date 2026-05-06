@@ -91,9 +91,21 @@ class SearchRepository @Inject constructor(
     private fun treeUriToFolderName(treeUri: String): String {
         if (treeUri.isBlank()) return ""
         return try {
-            val docId = DocumentsContract.getTreeDocumentId(Uri.parse(treeUri))
-            val path = docId.substringAfter(':')
-            path.substringAfterLast('/').ifEmpty { path }
+            val parsed = Uri.parse(treeUri)
+            val docId = runCatching { DocumentsContract.getTreeDocumentId(parsed) }.getOrNull()
+            if (!docId.isNullOrBlank()) {
+                // docId is typically "primary:DCIM/Camera" or "SD1234-5678:Downloads"
+                val path = docId.substringAfter(':').ifEmpty { docId }
+                val name = path.substringAfterLast('/')
+                if (name.isNotBlank()) return name
+            }
+            // Fallback: extract last meaningful segment from the URI path segments
+            parsed.pathSegments
+                .lastOrNull { it.isNotBlank() }
+                ?.substringAfterLast(':')
+                ?.substringAfterLast('/')
+                ?.ifBlank { null }
+                ?: ""
         } catch (_: Exception) {
             ""
         }

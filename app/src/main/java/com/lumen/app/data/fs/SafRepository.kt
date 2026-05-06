@@ -27,6 +27,8 @@ class SafRepository @Inject constructor(
         private val KEY_SEARCH_HISTORY = stringPreferencesKey("search_history")
         private val KEY_VIEWER_LAST_PAGES = stringSetPreferencesKey("viewer_last_pages")
         private val KEY_VIEWER_SCROLL_HORIZONTAL = booleanPreferencesKey("viewer_scroll_horizontal")
+        private val KEY_FILTER_OCR_ONLY = booleanPreferencesKey("filter_ocr_only")
+        private val KEY_FILTER_SORT_ORDER = stringPreferencesKey("filter_sort_order")
     }
 
     val hasCompletedOnboarding: Flow<Boolean> = dataStore.data.map { prefs ->
@@ -112,6 +114,24 @@ class SafRepository @Inject constructor(
 
     suspend fun setViewerScrollHorizontal(horizontal: Boolean) {
         dataStore.edit { it[KEY_VIEWER_SCROLL_HORIZONTAL] = horizontal }
+    }
+
+    // ── Search filter persistence ─────────────────────────────────────────────
+
+    val savedFilterOcrOnly: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[KEY_FILTER_OCR_ONLY] ?: false
+    }
+
+    val savedFilterSortOrder: Flow<String> = dataStore.data.map { prefs ->
+        prefs[KEY_FILTER_SORT_ORDER] ?: "RELEVANCE"
+    }
+
+    suspend fun saveFilterOcrOnly(ocrOnly: Boolean) {
+        dataStore.edit { it[KEY_FILTER_OCR_ONLY] = ocrOnly }
+    }
+
+    suspend fun saveFilterSortOrder(sortOrder: String) {
+        dataStore.edit { it[KEY_FILTER_SORT_ORDER] = sortOrder }
     }
 
     // ── Reading progress ──────────────────────────────────────────────────────

@@ -25,33 +25,56 @@ class PdfViewerViewModel @Inject constructor(
     private val searchRepository: SearchRepository,
     private val safRepository: SafRepository,
 ) : AndroidViewModel(application) {
+    private companion object {
+        // Highlights use PDFBox parsing; skip on very large files to avoid OOM.
+        private const val MAX_HIGHLIGHT_PDF_BYTES = 25L * 1024L * 1024L
+    }
 
     // ── Keyword highlights ────────────────────────────────────────────────────
 
     private val _highlights = MutableStateFlow<PdfHighlighter.PageHighlights?>(null)
     val highlights: StateFlow<PdfHighlighter.PageHighlights?> = _highlights
 
+    private val _highlightSkipped = MutableStateFlow(false)
+    val highlightSkipped: StateFlow<Boolean> = _highlightSkipped
+
     private var highlightJob: Job? = null
 
-    fun loadHighlights(uri: String, pageIndex: Int, keyword: String) {
+    fun loadHighlights(uri: String, pageIndex: Int, keyword: String, pdfPassword: String? = null) {
         if (keyword.isBlank()) {
             clearHighlights()
             return
         }
         val parsedUri = try { Uri.parse(uri) } catch (_: Exception) { return }
+        if (!canSafelyComputeHighlights(parsedUri)) {
+            _highlights.value = null
+            _highlightSkipped.value = true
+            return
+        }
+        _highlightSkipped.value = false
         highlightJob?.cancel()
         highlightJob = viewModelScope.launch(Dispatchers.IO) {
             _highlights.value = null
             val stream = try {
                 getApplication<Application>().contentResolver.openInputStream(parsedUri)
             } catch (_: Exception) { null } ?: return@launch
-            _highlights.value = stream.use { pdfHighlighter.findOnPage(it, pageIndex, keyword) }
+            _highlights.value = try {
+                stream.use { pdfHighlighter.findOnPage(it, pageIndex, keyword, pdfPassword) }
+            } catch (_: OutOfMemoryError) {
+                null
+            } catch (_: Exception) {
+                null
+            }
         }
     }
 
     fun clearHighlights() {
         highlightJob?.cancel()
         _highlights.value = null
+    }
+
+    fun resetHighlightSkipped() {
+        _highlightSkipped.value = false
     }
 
     // ── In-document search ────────────────────────────────────────────────────
@@ -110,4 +133,15 @@ class PdfViewerViewModel @Inject constructor(
     }
 
     suspend fun getLastPage(uri: String): Int? = safRepository.getLastPage(uri)
+
+    private fun canSafelyComputeHighlights(uri: Uri): Boolean {
+        val resolver = getApplication<Application>().contentResolver
+        val length = runCatching {
+            resolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                val reported = afd.length
+                if (reported >= 0) reported else null
+            }
+        }.getOrNull()
+        return length?.let { it <= MAX_HIGHLIGHT_PDF_BYTES } ?: true
+    }
 }

@@ -830,6 +830,15 @@ private fun SearchEmptyState(indexedCount: Int, onOpenLibrary: () -> Unit) {
             Spacer(Modifier.size(8.dp))
             Text("Go to library")
         }
+        if (indexedCount > 0) {
+            Spacer(Modifier.height(24.dp))
+            Text(
+                text = "Tip: Use multiple words for AND matching — \"climate policy 2024\" finds lines containing all three terms.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
     }
 }
 

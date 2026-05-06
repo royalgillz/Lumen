@@ -9,6 +9,7 @@ import com.lumen.app.data.db.dao.DocumentDao
 import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
+import com.lumen.app.domain.model.SortOrder
 import com.lumen.app.domain.usecase.SearchUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -20,6 +21,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
@@ -63,6 +66,16 @@ class SearchViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
     init {
+        // Restore persisted filter settings (folder filters not persisted — they can be stale)
+        viewModelScope.launch {
+            val ocrOnly = safRepository.savedFilterOcrOnly.first()
+            val sortOrderStr = safRepository.savedFilterSortOrder.first()
+            val sortOrder = runCatching { SortOrder.valueOf(sortOrderStr) }.getOrDefault(SortOrder.RELEVANCE)
+            if (ocrOnly || sortOrder != SortOrder.RELEVANCE) {
+                filters.value = filters.value.copy(ocrOnly = ocrOnly, sortOrder = sortOrder)
+            }
+        }
+
         @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
         combine(query, filters) { q, f -> q to f }
             .onEach { (q, _) ->
@@ -84,6 +97,15 @@ class SearchViewModel @Inject constructor(
                 _results.value = output?.results ?: emptyList()
                 _isTruncated.value = output?.isTruncated ?: false
                 _isSearching.value = false
+            }
+            .launchIn(viewModelScope)
+
+        // Persist filter changes, skipping the initial default emission
+        filters
+            .drop(1)
+            .onEach { f ->
+                safRepository.saveFilterOcrOnly(f.ocrOnly)
+                safRepository.saveFilterSortOrder(f.sortOrder.name)
             }
             .launchIn(viewModelScope)
     }

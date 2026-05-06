@@ -185,7 +185,10 @@ fun OnboardingScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onFinished) {
+                TextButton(onClick = {
+                    viewModel.markDone()
+                    onFinished()
+                }) {
                     Text("Skip", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -220,6 +223,7 @@ fun OnboardingScreen(
                     if (selectedFolder != null) {
                         viewModel.addFolderAndStartIndexing()
                     }
+                    viewModel.markDone()
                     onFinished()
                 },
                 modifier = Modifier

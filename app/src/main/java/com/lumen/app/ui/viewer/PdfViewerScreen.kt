@@ -3,11 +3,8 @@ package com.lumen.app.ui.viewer
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.net.Uri
-import android.view.View
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
@@ -44,10 +41,8 @@ import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.BrightnessLow
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -61,6 +56,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -109,17 +105,9 @@ import kotlinx.coroutines.delay
 import java.io.FileNotFoundException
 import java.util.concurrent.atomic.AtomicReference
 
-private val NIGHT_MODE_MATRIX = ColorMatrix(
-    floatArrayOf(
-        -1f, 0f, 0f, 0f, 255f,
-        0f, -1f, 0f, 0f, 255f,
-        0f, 0f, -1f, 0f, 255f,
-        0f, 0f, 0f, 1f, 0f,
-    )
-)
-
 private const val ZOOM_STEP = 1.25f
 private const val ZOOM_MIN = 1f
+private const val ZOOM_MID = 3.25f
 private const val ZOOM_MAX = 8f
 
 private data class HighlightDrawData(
@@ -150,7 +138,6 @@ fun PdfViewerScreen(
     val displayPage = remember { mutableIntStateOf(pageNumber) }
     val pageCount = remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(parsedUri != null) }
-    var isNightMode by remember { mutableStateOf(false) }
     var showPageJump by remember { mutableStateOf(false) }
     var pageJumpInput by remember { mutableStateOf("") }
     var showPasswordPrompt by remember { mutableStateOf(false) }
@@ -161,15 +148,9 @@ fun PdfViewerScreen(
 
     // ── Highlight draw data shared with PDFView's onDrawAll callback ──────────
     val highlightDrawRef = remember { AtomicReference<HighlightDrawData?>(null) }
-    val dayHighlightPaint = remember {
+    val highlightPaint = remember {
         android.graphics.Paint().apply {
             color = android.graphics.Color.argb(89, 0xD4, 0xA2, 0x4C)
-            style = android.graphics.Paint.Style.FILL
-        }
-    }
-    val nightHighlightPaint = remember {
-        android.graphics.Paint().apply {
-            color = android.graphics.Color.argb(140, 0xD4, 0xA2, 0x4C)
             style = android.graphics.Paint.Style.FILL
         }
     }
@@ -197,10 +178,12 @@ fun PdfViewerScreen(
     }
 
     val highlights by viewModel.highlights.collectAsState()
+    val highlightSkipped by viewModel.highlightSkipped.collectAsState()
     val matchPages by viewModel.viewerMatchPages.collectAsState()
     val matchIndex by viewModel.viewerMatchIndex.collectAsState()
     val activeHighlightQuery = if (isViewerSearchActive) viewerSearchText.trim() else keyword.trim()
     val latestHighlightQuery by rememberUpdatedState(activeHighlightQuery)
+    val latestPdfPassword by rememberUpdatedState(activePdfPassword)
     val viewerSearchQuery = viewerSearchText.trim()
     val viewerChromeColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.96f)
     val statusBarScrimColor = MaterialTheme.colorScheme.surfaceVariant
@@ -255,18 +238,18 @@ fun PdfViewerScreen(
             if (result == SnackbarResult.ActionPerformed) {
                 pdfView?.jumpTo(lastPage, true)
                 displayPage.intValue = lastPage
-                if (activeHighlightQuery.isNotBlank()) viewModel.loadHighlights(uri, lastPage, activeHighlightQuery)
+                if (activeHighlightQuery.isNotBlank()) viewModel.loadHighlights(uri, lastPage, activeHighlightQuery, activePdfPassword)
             }
         }
     }
 
     // ── Initial keyword highlights ────────────────────────────────────────────
-    LaunchedEffect(uri, pageNumber, activeHighlightQuery) {
-        viewModel.loadHighlights(uri, pageNumber, activeHighlightQuery)
+    LaunchedEffect(uri, pageNumber, activeHighlightQuery, activePdfPassword) {
+        viewModel.loadHighlights(uri, pageNumber, activeHighlightQuery, activePdfPassword)
     }
 
     // ── Sync highlights → onDrawAll ref (runs on main thread, safe to invalidate) ──
-    LaunchedEffect(highlights, displayPage.intValue, isNightMode) {
+    LaunchedEffect(highlights, displayPage.intValue) {
         val h = highlights
         highlightDrawRef.set(
             if (h != null && h.rects.isNotEmpty() && h.pageWidthPts > 0f)
@@ -275,24 +258,35 @@ fun PdfViewerScreen(
                     rects = h.rects,
                     pageWidthPts = h.pageWidthPts,
                     pageHeightPts = h.pageHeightPts,
-                    paint = if (isNightMode) nightHighlightPaint else dayHighlightPaint,
+                    paint = highlightPaint,
                 )
             else null
         )
         pdfView?.invalidate()
     }
 
+    // ── Highlight-skipped snackbar ────────────────────────────────────────────
+    LaunchedEffect(highlightSkipped) {
+        if (highlightSkipped) {
+            snackbarHostState.showSnackbar(
+                message = "Highlights not shown — PDF exceeds 25 MB",
+                duration = SnackbarDuration.Short,
+            )
+            viewModel.resetHighlightSkipped()
+        }
+    }
+
     // ── In-viewer match navigation ────────────────────────────────────────────
-    LaunchedEffect(matchIndex, matchPages) {
+    LaunchedEffect(matchIndex, matchPages, activeHighlightQuery, activePdfPassword) {
         if (matchPages.isNotEmpty()) {
             val page = matchPages.getOrNull(matchIndex) ?: return@LaunchedEffect
             pdfView?.jumpTo(page, true)
-            viewModel.loadHighlights(uri, page, activeHighlightQuery)
+            viewModel.loadHighlights(uri, page, activeHighlightQuery, activePdfPassword)
         }
     }
 
     // Debounced in-viewer search. Prevents noisy one-letter highlights while typing.
-    LaunchedEffect(isViewerSearchActive, viewerSearchQuery) {
+    LaunchedEffect(isViewerSearchActive, viewerSearchQuery, activePdfPassword) {
         if (!isViewerSearchActive) return@LaunchedEffect
         delay(180)
         if (viewerSearchQuery.length < 2) {
@@ -301,7 +295,7 @@ fun PdfViewerScreen(
             return@LaunchedEffect
         }
         viewModel.searchInDocument(uri, viewerSearchQuery)
-        viewModel.loadHighlights(uri, displayPage.intValue, viewerSearchQuery)
+        viewModel.loadHighlights(uri, displayPage.intValue, viewerSearchQuery, activePdfPassword)
     }
 
     // ── Page jump dialog ──────────────────────────────────────────────────────
@@ -351,7 +345,7 @@ fun PdfViewerScreen(
                     val target = pageJumpInput.toIntOrNull()?.minus(1)
                     if (target != null && target in 0 until pageCount.intValue) {
                         pdfView?.jumpTo(target, true)
-                        if (activeHighlightQuery.isNotBlank()) viewModel.loadHighlights(uri, target, activeHighlightQuery)
+                        if (activeHighlightQuery.isNotBlank()) viewModel.loadHighlights(uri, target, activeHighlightQuery, activePdfPassword)
                     }
                     showPageJump = false
                     pageJumpInput = ""
@@ -397,6 +391,9 @@ fun PdfViewerScreen(
                                 PDFView(ctx, null).also { v ->
                                     pdfView = v
                                     isLoading = true
+                                    v.setMinZoom(ZOOM_MIN)
+                                    v.setMidZoom(ZOOM_MID)
+                                    v.setMaxZoom(ZOOM_MAX)
                                     runCatching {
                                         val config = v.fromStream(stream)
                                             .defaultPage(displayPage.intValue)
@@ -431,7 +428,7 @@ fun PdfViewerScreen(
                                                     pageCount.intValue = count
                                                     viewModel.saveLastPage(uri, page)
                                                     if (latestHighlightQuery.isNotBlank()) {
-                                                        viewModel.loadHighlights(uri, page, latestHighlightQuery)
+                                                        viewModel.loadHighlights(uri, page, latestHighlightQuery, latestPdfPassword)
                                                     }
                                                 }
                                             })
@@ -443,17 +440,16 @@ fun PdfViewerScreen(
                                             .onError { throwable ->
                                                 isLoading = false
                                                 val message = throwable.message.orEmpty()
-                                                val encrypted = message.contains("password", ignoreCase = true) ||
-                                                    message.contains("encrypted", ignoreCase = true)
+                                                val encrypted = isLikelyEncryptedPdf(message)
                                                 if (encrypted) {
                                                     showPasswordPrompt = true
                                                 } else {
-                                                    runtimeOpenError = if (message.isNotBlank()) message else "Unable to open this PDF."
+                                                    runtimeOpenError = userMessageForPdfLoadFailure(throwable)
                                                 }
                                             }
                                             .enableSwipe(true)
                                             .enableDoubletap(true)
-                                            .enableAnnotationRendering(true)
+                                            .enableAnnotationRendering(false)
                                             .onDrawAll { canvas, pageWidth, pageHeight, displayedPage ->
                                                 val data = highlightDrawRef.get() ?: return@onDrawAll
                                                 if (data.pageIndex != displayedPage || data.pageWidthPts <= 0f) return@onDrawAll
@@ -471,21 +467,13 @@ fun PdfViewerScreen(
                                     }.onFailure { throwable ->
                                         isLoading = false
                                         val message = throwable.message.orEmpty()
-                                        val encrypted = message.contains("password", ignoreCase = true) ||
-                                            message.contains("encrypted", ignoreCase = true)
+                                        val encrypted = isLikelyEncryptedPdf(message)
                                         if (encrypted) {
                                             showPasswordPrompt = true
                                         } else {
-                                            runtimeOpenError = if (message.isNotBlank()) message else "Unable to open this PDF."
+                                            runtimeOpenError = userMessageForPdfLoadFailure(throwable)
                                         }
                                     }
-                                }
-                            },
-                            update = { v ->
-                                if (isNightMode) {
-                                    v.setLayerType(View.LAYER_TYPE_HARDWARE, Paint().apply { colorFilter = ColorMatrixColorFilter(NIGHT_MODE_MATRIX) })
-                                } else {
-                                    v.setLayerType(View.LAYER_TYPE_NONE, null)
                                 }
                             },
                             modifier = Modifier.fillMaxSize(),
@@ -614,9 +602,6 @@ fun PdfViewerScreen(
                         IconButton(onClick = { showBrightnessSlider = !showBrightnessSlider; controlsTouchTick++ }) {
                             Icon(Icons.Default.BrightnessMedium, contentDescription = "Brightness", tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurface)
                         }
-                        IconButton(onClick = { isNightMode = !isNightMode; controlsTouchTick++ }) {
-                            Icon(imageVector = if (isNightMode) Icons.Default.LightMode else Icons.Default.DarkMode, contentDescription = null, tint = if (isNightMode) AmberAccent else MaterialTheme.colorScheme.onSurface)
-                        }
                         IconButton(onClick = { viewModel.toggleScrollMode(); controlsTouchTick++ }) {
                             Icon(imageVector = if (scrollHorizontal) Icons.Default.SwapVert else Icons.Default.SwapHoriz, contentDescription = null)
                         }
@@ -731,6 +716,22 @@ fun PdfViewerScreen(
             }
         }
     }
+}
+
+private fun isLikelyEncryptedPdf(message: String): Boolean =
+    message.contains("password", ignoreCase = true) || message.contains("encrypted", ignoreCase = true)
+
+private fun userMessageForPdfLoadFailure(throwable: Throwable): String {
+    if (throwable is OutOfMemoryError) {
+        return "This PDF requires too much memory to display. Close other apps and try again, or view it on a PC if it contains many high-resolution scanned pages."
+    }
+    val message = throwable.message.orEmpty()
+    if (message.contains("Failed to allocate", ignoreCase = true) ||
+        message.contains("OutOfMemory", ignoreCase = true) ||
+        message.contains("OOM", ignoreCase = true)) {
+        return "This PDF requires too much memory to display. Close other apps and try again, or view it on a PC if it contains many high-resolution scanned pages."
+    }
+    return if (message.isNotBlank()) message else "Unable to open this PDF."
 }
 
 private fun handlePdfLinkTap(
