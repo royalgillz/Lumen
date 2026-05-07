@@ -33,9 +33,9 @@
 -keep class com.googlecode.tesseract.android.** { *; }
 -dontwarn com.googlecode.tesseract.**
 
-# ── AndroidPdfViewer (barteksc / PDFium) ──────────────────────────────────────
--keep class com.github.barteksc.pdfviewer.** { *; }
--dontwarn com.github.barteksc.**
+# ── MuPDF (fitz JNI bindings) ─────────────────────────────────────────────────
+-keep class com.artifex.mupdf.fitz.** { *; }
+-dontwarn com.artifex.mupdf.**
 
 # ── Kotlin coroutines ─────────────────────────────────────────────────────────
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}

@@ -9,6 +9,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.lumen.app.R
@@ -118,8 +119,9 @@ fun TrashIcon(color: Color, modifier: Modifier = Modifier) {
 @Composable
 fun LumenBrandIcon(modifier: Modifier = Modifier) {
     Image(
-        painter = painterResource(id = R.drawable.lumen_icon_48),
+        painter = painterResource(id = R.drawable.lumen_icon_512),
         contentDescription = "Lumen logo",
-        modifier = modifier.size(22.dp),
+        contentScale = ContentScale.Fit,
+        modifier = modifier,
     )
 }

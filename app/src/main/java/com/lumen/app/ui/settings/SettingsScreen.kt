@@ -233,6 +233,7 @@ private fun PrivacyAuditCard() {
             PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "No analytics or crash reporting", "No Firebase, Sentry, or any SDK that phones home.", isGood = true)
             PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "Files read in-place", "PDFs are never copied into app storage.", isGood = true)
             PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "Index stored on-device only", "Full-text index lives in a local SQLite database.", isGood = true)
+            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "AGPL source availability", "Source code available at github.com/royalgillz/Lumen", isGood = true)
         }
     }
 }

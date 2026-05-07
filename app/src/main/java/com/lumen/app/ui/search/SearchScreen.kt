@@ -237,14 +237,11 @@ private fun SearchHeader(
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onBackground,
             )
-            Box(
+            LumenBrandIcon(
                 modifier = Modifier
-                    .size(32.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                LumenBrandIcon()
-            }
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(9.dp))
+            )
         }
 
         Row(

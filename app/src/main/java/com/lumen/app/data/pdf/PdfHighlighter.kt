@@ -1,6 +1,7 @@
 package com.lumen.app.data.pdf
 
 import android.graphics.RectF
+import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import com.tom_roush.pdfbox.text.TextPosition
@@ -17,10 +18,15 @@ class PdfHighlighter @Inject constructor() {
         val pageHeightPts: Float,
     )
 
-    fun findOnPage(stream: InputStream, pageIndex: Int, keyword: String): PageHighlights {
+    /**
+     * Computes highlight rectangles for [pageIndex] only (stripper is scoped to that page).
+     * Uses mixed RAM + scratch file so large PDFs are less likely to OOM than [PDDocument.load] defaults.
+     */
+    fun findOnPage(stream: InputStream, pageIndex: Int, keyword: String, password: String? = null): PageHighlights {
         if (keyword.isBlank()) return PageHighlights(emptyList(), 0f, 0f)
+        val mem = MemoryUsageSetting.setupMixed(8L * 1024 * 1024)
         return try {
-            PDDocument.load(stream).use { doc ->
+            PDDocument.load(stream, password ?: "", mem).use { doc ->
                 if (pageIndex >= doc.numberOfPages) return PageHighlights(emptyList(), 0f, 0f)
                 val page = doc.getPage(pageIndex)
 
@@ -44,6 +50,8 @@ class PdfHighlighter @Inject constructor() {
 
                 PageHighlights(stripper.highlights, pageWidthPts, pageHeightPts)
             }
+        } catch (_: OutOfMemoryError) {
+            PageHighlights(emptyList(), 0f, 0f)
         } catch (_: Exception) {
             PageHighlights(emptyList(), 0f, 0f)
         }

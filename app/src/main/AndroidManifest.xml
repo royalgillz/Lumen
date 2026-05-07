@@ -27,6 +27,7 @@
 
     <application
         android:name=".LumenApplication"
+        android:largeHeap="true"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"

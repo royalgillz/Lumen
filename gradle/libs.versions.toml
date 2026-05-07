@@ -25,7 +25,7 @@ robolectric = "4.14"
 pdfboxAndroid = "2.0.27.0"
 mlkitTextRecognition = "16.0.1"
 tesseract4android = "4.7.0"
-androidPdfViewer = "3.2.0-beta.3"
+mupdf = "1.26.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -82,8 +82,8 @@ mlkit-text-recognition-devanagari = { group = "com.google.mlkit", name = "text-r
 # OCR fallback (Arabic, Cyrillic via Tesseract traineddata)
 tesseract4android = { group = "cz.adaptech.tesseract4android", name = "tesseract4android", version.ref = "tesseract4android" }
 
-# PDF viewer (JitPack)
-android-pdf-viewer = { group = "com.github.mhiew", name = "android-pdf-viewer", version.ref = "androidPdfViewer" }
+# PDF viewer (MavenCentral — AGPL, tiled rendering)
+mupdf-fitz = { group = "com.artifex.mupdf", name = "fitz", version.ref = "mupdf" }
 
 # Testing
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }

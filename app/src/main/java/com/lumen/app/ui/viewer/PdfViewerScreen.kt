@@ -3,7 +3,6 @@ package com.lumen.app.ui.viewer
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.graphics.Paint
 import android.net.Uri
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
@@ -18,11 +17,16 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,6 +35,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.border
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -43,6 +50,7 @@ import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -61,6 +69,8 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -69,11 +79,13 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -82,8 +94,15 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -95,30 +114,20 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
-import com.github.barteksc.pdfviewer.PDFView
-import com.github.barteksc.pdfviewer.listener.OnPageChangeListener
-import com.github.barteksc.pdfviewer.link.DefaultLinkHandler
-import com.github.barteksc.pdfviewer.model.LinkTapEvent
 import com.lumen.app.ui.theme.AmberAccent
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import java.io.FileNotFoundException
-import java.util.concurrent.atomic.AtomicReference
 
 private const val ZOOM_STEP = 1.25f
 private const val ZOOM_MIN = 1f
 private const val ZOOM_MID = 3.25f
 private const val ZOOM_MAX = 8f
 
-private data class HighlightDrawData(
-    val pageIndex: Int,
-    val rects: List<android.graphics.RectF>,
-    val pageWidthPts: Float,
-    val pageHeightPts: Float,
-    val paint: android.graphics.Paint,
-)
+private data class PanOffset(val x: Float, val y: Float)
 
 @Composable
 fun PdfViewerScreen(
@@ -136,9 +145,8 @@ fun PdfViewerScreen(
     val parsedUri = remember(uri) { runCatching { Uri.parse(uri) }.getOrNull() }
 
     // ── Persistent state (survives scroll-mode rebuild) ───────────────────────
-    var pdfView by remember { mutableStateOf<PDFView?>(null) }
     val displayPage = remember { mutableIntStateOf(pageNumber) }
-    val pageCount = remember { mutableIntStateOf(0) }
+    val pageCount by viewModel.pageCount.collectAsState()
     var isLoading by remember { mutableStateOf(parsedUri != null) }
     var showPageJump by remember { mutableStateOf(false) }
     var pageJumpInput by remember { mutableStateOf("") }
@@ -148,22 +156,14 @@ fun PdfViewerScreen(
     var pdfReloadToken by remember { mutableIntStateOf(0) }
     var runtimeOpenError by remember { mutableStateOf<String?>(null) }
 
-    // ── Highlight draw data shared with PDFView's onDrawAll callback ──────────
-    val highlightDrawRef = remember { AtomicReference<HighlightDrawData?>(null) }
-    val highlightPaint = remember {
-        android.graphics.Paint().apply {
-            color = android.graphics.Color.argb(89, 0xD4, 0xA2, 0x4C)
-            style = android.graphics.Paint.Style.FILL
-        }
-    }
-
     // In-viewer search
     var isViewerSearchActive by remember { mutableStateOf(false) }
     var viewerSearchText by remember { mutableStateOf("") }
 
-    // Brightness
+    // Brightness / overflow menu
     var showBrightnessSlider by remember { mutableStateOf(false) }
     var brightness by remember { mutableFloatStateOf(0.5f) }
+    var showOverflowMenu by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(true) }
     var controlsTouchTick by remember { mutableIntStateOf(0) }
 
@@ -173,7 +173,7 @@ fun PdfViewerScreen(
     val scrollHorizontal by viewModel.scrollHorizontal.collectAsState()
     LaunchedEffect(showControls, controlsTouchTick, runtimeOpenError) {
         // Don't auto-hide while an error is shown — the toolbar is the only way back
-        if (showControls && !isViewerSearchActive && runtimeOpenError == null) {
+        if (showControls && !isViewerSearchActive && !showBrightnessSlider && !showOverflowMenu && runtimeOpenError == null) {
             delay(4200)
             showControls = false
             showBrightnessSlider = false
@@ -199,11 +199,22 @@ fun PdfViewerScreen(
         animationSpec = tween(180),
         label = "viewer_top_chrome_padding",
     )
+    val pagerState = rememberPagerState(initialPage = pageNumber) { if (pageCount > 0) pageCount else 1 }
+    var viewportSizePx by remember { mutableStateOf(IntSize.Zero) }
+    var currentScale by remember { mutableFloatStateOf(1f) }
+    var currentOffsetX by remember { mutableFloatStateOf(0f) }
+    var currentOffsetY by remember { mutableFloatStateOf(0f) }
+    var pendingJumpPage by remember { mutableStateOf<Int?>(null) }
+    var zoomInClicks by remember { mutableIntStateOf(0) }
+    var zoomOutClicks by remember { mutableIntStateOf(0) }
+    var pagerScrollEnabled by remember { mutableStateOf(true) }
+    var scaleAppliedToPage by remember { mutableIntStateOf(pageNumber) }
 
     // Keep status bar icon contrast aligned with the app theme.
     if (activity != null) {
         SideEffect {
             val window = activity.window
+            @Suppress("DEPRECATION")
             window.statusBarColor = statusBarColor
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !isDarkTheme
         }
@@ -239,9 +250,7 @@ fun PdfViewerScreen(
                 actionLabel = "Go",
             )
             if (result == SnackbarResult.ActionPerformed) {
-                pdfView?.jumpTo(lastPage, true)
-                displayPage.intValue = lastPage
-                if (activeHighlightQuery.isNotBlank()) viewModel.loadHighlights(uri, lastPage, activeHighlightQuery, activePdfPassword)
+                pendingJumpPage = lastPage
             }
         }
     }
@@ -249,23 +258,6 @@ fun PdfViewerScreen(
     // ── Initial keyword highlights ────────────────────────────────────────────
     LaunchedEffect(uri, pageNumber, activeHighlightQuery, activePdfPassword) {
         viewModel.loadHighlights(uri, pageNumber, activeHighlightQuery, activePdfPassword)
-    }
-
-    // ── Sync highlights → onDrawAll ref (runs on main thread, safe to invalidate) ──
-    LaunchedEffect(highlights, displayPage.intValue) {
-        val h = highlights
-        highlightDrawRef.set(
-            if (h != null && h.rects.isNotEmpty() && h.pageWidthPts > 0f)
-                HighlightDrawData(
-                    pageIndex = displayPage.intValue,
-                    rects = h.rects,
-                    pageWidthPts = h.pageWidthPts,
-                    pageHeightPts = h.pageHeightPts,
-                    paint = highlightPaint,
-                )
-            else null
-        )
-        pdfView?.invalidate()
     }
 
     // ── Highlight-skipped snackbar ────────────────────────────────────────────
@@ -283,9 +275,28 @@ fun PdfViewerScreen(
     LaunchedEffect(matchIndex, matchPages, activeHighlightQuery, activePdfPassword) {
         if (matchPages.isNotEmpty()) {
             val page = matchPages.getOrNull(matchIndex) ?: return@LaunchedEffect
-            pdfView?.jumpTo(page, true)
+            pendingJumpPage = page
             viewModel.loadHighlights(uri, page, activeHighlightQuery, activePdfPassword)
         }
+    }
+    LaunchedEffect(pagerState.currentPage) {
+        scaleAppliedToPage = pagerState.currentPage
+        displayPage.intValue = pagerState.currentPage
+        viewModel.saveLastPage(uri, pagerState.currentPage)
+        if (activeHighlightQuery.isNotBlank()) {
+            viewModel.loadHighlights(uri, pagerState.currentPage, activeHighlightQuery, activePdfPassword)
+        }
+        currentScale = 1f
+        currentOffsetX = 0f
+        currentOffsetY = 0f
+        pagerScrollEnabled = true
+        isLoading = false
+    }
+    LaunchedEffect(pendingJumpPage, pageCount) {
+        val target = pendingJumpPage ?: return@LaunchedEffect
+        if (target !in 0 until (if (pageCount > 0) pageCount else 1)) return@LaunchedEffect
+        pagerState.animateScrollToPage(target)
+        pendingJumpPage = null
     }
 
     // Debounced in-viewer search. Prevents noisy one-letter highlights while typing.
@@ -330,7 +341,7 @@ fun PdfViewerScreen(
     }
 
     // ── Page jump dialog ──────────────────────────────────────────────────────
-    if (showPageJump && pageCount.intValue > 0) {
+    if (showPageJump && pageCount > 0) {
         AlertDialog(
             onDismissRequest = { showPageJump = false },
             title = { Text("Go to page") },
@@ -338,7 +349,7 @@ fun PdfViewerScreen(
                 TextField(
                     value = pageJumpInput,
                     onValueChange = { pageJumpInput = it.filter { c -> c.isDigit() } },
-                    label = { Text("Page (1–${pageCount.intValue})") },
+                    label = { Text("Page (1–${pageCount})") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
@@ -346,8 +357,8 @@ fun PdfViewerScreen(
             confirmButton = {
                 TextButton(onClick = {
                     val target = pageJumpInput.toIntOrNull()?.minus(1)
-                    if (target != null && target in 0 until pageCount.intValue) {
-                        pdfView?.jumpTo(target, true)
+                    if (target != null && target in 0 until pageCount) {
+                        pendingJumpPage = target
                         if (activeHighlightQuery.isNotBlank()) viewModel.loadHighlights(uri, target, activeHighlightQuery, activePdfPassword)
                     }
                     showPageJump = false
@@ -372,24 +383,20 @@ fun PdfViewerScreen(
                 .padding(top = topChromePadding)
         ) {
             if (parsedUri != null) {
-                // key() forces full rebuild of PDFView when scroll mode changes
                 key(scrollHorizontal, activePdfPassword.orEmpty(), pdfReloadToken) {
-                    val (stream, openErrorMsg) = remember(parsedUri, pdfReloadToken) {
+                    val openErrorMsg = remember(parsedUri, pdfReloadToken) {
                         try {
-                            Pair(context.contentResolver.openInputStream(parsedUri), null)
+                            context.contentResolver.openFileDescriptor(parsedUri, "r")?.use {}
+                            null
                         } catch (_: SecurityException) {
-                            Pair(null, "Permission denied.\nGo to Library, remove this folder, and re-add it to restore access.")
+                            "Permission denied.\nGo to Library, remove this folder, and re-add it to restore access."
                         } catch (_: FileNotFoundException) {
-                            Pair(null, "File not found.\nThis PDF may have been moved or deleted.")
+                            "File not found.\nThis PDF may have been moved or deleted."
                         } catch (_: Exception) {
-                            Pair(null, "Unable to open this PDF.")
+                            "Unable to open this PDF."
                         }
                     }
 
-                    DisposableEffect(stream) { onDispose { stream?.close() } }
-
-                    // Hoist stream-open failures into runtimeOpenError so the toolbar
-                    // stays visible and the spinner is cleared correctly.
                     LaunchedEffect(openErrorMsg) {
                         if (openErrorMsg != null) {
                             runtimeOpenError = openErrorMsg
@@ -398,101 +405,219 @@ fun PdfViewerScreen(
                         }
                     }
 
-                    if (stream != null && runtimeOpenError == null) {
-                        AndroidView(
-                            factory = { ctx ->
-                                PDFView(ctx, null).also { v ->
-                                    pdfView = v
-                                    isLoading = true
-                                    v.setMinZoom(ZOOM_MIN)
-                                    v.setMidZoom(ZOOM_MID)
-                                    v.setMaxZoom(ZOOM_MAX)
-                                    runCatching {
-                                        val config = v.fromStream(stream)
-                                            .defaultPage(displayPage.intValue)
-                                            .swipeHorizontal(scrollHorizontal)
-                                        if (!activePdfPassword.isNullOrBlank()) {
-                                            config.password(activePdfPassword)
+                    if (openErrorMsg == null && runtimeOpenError == null) {
+                        val pager: @Composable () -> Unit = {
+                            BoxWithConstraints(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .onSizeChanged { viewportSizePx = it }
+                            ) {
+                                val widthPx = constraints.maxWidth.coerceAtLeast(1)
+                                val pageContent: @Composable (Int) -> Unit = { pageIndex ->
+                                    val bitmap by produceState<android.graphics.Bitmap?>(null, pageIndex, widthPx, pageCount, activePdfPassword, pdfReloadToken) {
+                                        value = try {
+                                            viewModel.renderPage(uri, pageIndex, widthPx, activePdfPassword)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (throwable: Throwable) {
+                                            if (isLikelyEncryptedPdf(throwable.message.orEmpty())) {
+                                                showPasswordPrompt = true
+                                            } else {
+                                                runtimeOpenError = userMessageForPdfLoadFailure(throwable)
+                                            }
+                                            null
                                         }
-                                        config
-                                            .linkHandler { event ->
-                                                handlePdfLinkTap(
-                                                    event = event,
-                                                    context = ctx,
-                                                    pdfView = v,
-                                                    onExternalLinkError = {
-                                                        showControls = true
-                                                        controlsTouchTick++
-                                                    },
+                                        if (pageIndex == pagerState.currentPage) {
+                                            isLoading = false
+                                        }
+                                    }
+                                    val pageSize by produceState<android.graphics.PointF?>(null, pageIndex, activePdfPassword) {
+                                        value = viewModel.getPageSize(uri, pageIndex, activePdfPassword)
+                                    }
+                                    val pageLinks by produceState<List<MuLink>>(emptyList(), pageIndex, activePdfPassword) {
+                                        value = viewModel.getLinks(uri, pageIndex, activePdfPassword)
+                                    }
+                                    val transformableState = rememberTransformableState { zoomChange, panChange, _ ->
+                                        if (pageIndex != pagerState.currentPage) return@rememberTransformableState
+                                        currentScale = (currentScale * zoomChange).coerceIn(ZOOM_MIN, ZOOM_MAX)
+                                        val panSpeed = 1.5f
+                                        val clamped = clampPanOffset(
+                                            viewportWidth = viewportSizePx.width.toFloat(),
+                                            viewportHeight = viewportSizePx.height.toFloat(),
+                                            bitmap = bitmap,
+                                            scale = currentScale,
+                                            offsetX = currentOffsetX + panChange.x * panSpeed,
+                                            offsetY = currentOffsetY + panChange.y * panSpeed,
+                                        )
+                                        currentOffsetX = clamped.x
+                                        currentOffsetY = clamped.y
+                                        pagerScrollEnabled = currentScale <= 1.02f
+                                    }
+                                    LaunchedEffect(zoomInClicks, pageIndex) {
+                                        if (pageIndex == pagerState.currentPage && zoomInClicks > 0) {
+                                            currentScale = (currentScale * ZOOM_STEP).coerceAtMost(ZOOM_MAX)
+                                            val clamped = clampPanOffset(
+                                                viewportWidth = viewportSizePx.width.toFloat(),
+                                                viewportHeight = viewportSizePx.height.toFloat(),
+                                                bitmap = bitmap,
+                                                scale = currentScale,
+                                                offsetX = currentOffsetX,
+                                                offsetY = currentOffsetY,
+                                            )
+                                            currentOffsetX = clamped.x
+                                            currentOffsetY = clamped.y
+                                            pagerScrollEnabled = currentScale <= 1.02f
+                                        }
+                                    }
+                                    LaunchedEffect(zoomOutClicks, pageIndex) {
+                                        if (pageIndex == pagerState.currentPage && zoomOutClicks > 0) {
+                                            currentScale = (currentScale / ZOOM_STEP).coerceAtLeast(ZOOM_MIN)
+                                            val clamped = clampPanOffset(
+                                                viewportWidth = viewportSizePx.width.toFloat(),
+                                                viewportHeight = viewportSizePx.height.toFloat(),
+                                                bitmap = bitmap,
+                                                scale = currentScale,
+                                                offsetX = currentOffsetX,
+                                                offsetY = currentOffsetY,
+                                            )
+                                            currentOffsetX = clamped.x
+                                            currentOffsetY = clamped.y
+                                            pagerScrollEnabled = currentScale <= 1.02f
+                                        }
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clipToBounds()
+                                            .pointerInput(pageLinks, pageSize, pageIndex) {
+                                                detectTapGestures(
+                                                    onTap = { tap ->
+                                                        val sizePts = pageSize ?: return@detectTapGestures
+                                                        val rendered = renderedPageRect(
+                                                            viewportWidth = viewportSizePx.width.toFloat(),
+                                                            viewportHeight = viewportSizePx.height.toFloat(),
+                                                            bitmap = bitmap,
+                                                            scale = if (pageIndex == pagerState.currentPage) currentScale else 1f,
+                                                            offsetX = if (pageIndex == pagerState.currentPage) currentOffsetX else 0f,
+                                                            offsetY = if (pageIndex == pagerState.currentPage) currentOffsetY else 0f,
+                                                        ) ?: return@detectTapGestures
+                                                        if (!rendered.contains(tap)) return@detectTapGestures
+                                                        val xPts = ((tap.x - rendered.left) / rendered.width) * sizePts.x
+                                                        val yPts = ((tap.y - rendered.top) / rendered.height) * sizePts.y
+                                                        val tapped = pageLinks.firstOrNull { it.bounds.contains(xPts, yPts) }
+                                                        if (tapped != null) {
+                                                            when {
+                                                                tapped.pageTarget != null -> pendingJumpPage = tapped.pageTarget
+                                                                !tapped.uri.isNullOrBlank() -> {
+                                                                    val targetUri = tapped.uri
+                                                                    val normalized = if (targetUri.startsWith("http://", true) || targetUri.startsWith("https://", true)) targetUri else "https://$targetUri"
+                                                                    try {
+                                                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(normalized)).apply {
+                                                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                                        })
+                                                                    } catch (_: ActivityNotFoundException) {
+                                                                        showControls = true
+                                                                        controlsTouchTick++
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            showControls = !showControls
+                                                            if (!showControls) {
+                                                                showBrightnessSlider = false
+                                                                isViewerSearchActive = false
+                                                            }
+                                                            controlsTouchTick++
+                                                        }
+                                                    }
                                                 )
-                                            }
-                                            .onTap {
-                                                showControls = !showControls
-                                                if (!showControls) {
-                                                    showBrightnessSlider = false
-                                                    isViewerSearchActive = false
-                                                }
-                                                controlsTouchTick++
-                                                true
-                                            }
-                                            .onPageChange(object : OnPageChangeListener {
-                                                override fun onPageChanged(page: Int, count: Int) {
-                                                    displayPage.intValue = page
-                                                    pageCount.intValue = count
-                                                    viewModel.saveLastPage(uri, page)
-                                                    if (latestHighlightQuery.isNotBlank()) {
-                                                        viewModel.loadHighlights(uri, page, latestHighlightQuery, latestPdfPassword)
+                                            },
+                                    ) {
+                                        if (bitmap != null) {
+                                            androidx.compose.foundation.Image(
+                                                bitmap = bitmap!!.asImageBitmap(),
+                                                contentDescription = "PDF page ${pageIndex + 1}",
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .graphicsLayer {
+                                                        val applyZoom = pageIndex == pagerState.currentPage && scaleAppliedToPage == pagerState.currentPage
+                                                        scaleX = if (applyZoom) currentScale else 1f
+                                                        scaleY = if (applyZoom) currentScale else 1f
+                                                        translationX = if (applyZoom) currentOffsetX else 0f
+                                                        translationY = if (applyZoom) currentOffsetY else 0f
+                                                    }
+                                                    .transformable(
+                                                        state = transformableState,
+                                                        canPan = {
+                                                            pageIndex == pagerState.currentPage && currentScale > 1.02f
+                                                        },
+                                                    ),
+                                            )
+                                            val pageHighlights = highlights
+                                            if (pageHighlights != null && pageHighlights.pageWidthPts > 0f && pageIndex == displayPage.intValue) {
+                                                androidx.compose.foundation.Canvas(Modifier.matchParentSize()) {
+                                                    val rendered = renderedPageRect(
+                                                        viewportWidth = size.width,
+                                                        viewportHeight = size.height,
+                                                        bitmap = bitmap,
+                                                        scale = if (pageIndex == pagerState.currentPage) currentScale else 1f,
+                                                        offsetX = if (pageIndex == pagerState.currentPage) currentOffsetX else 0f,
+                                                        offsetY = if (pageIndex == pagerState.currentPage) currentOffsetY else 0f,
+                                                    ) ?: return@Canvas
+                                                    pageHighlights.rects.forEach { rect ->
+                                                        val scaleX = rendered.width / pageHighlights.pageWidthPts
+                                                        val scaleY = rendered.height / pageHighlights.pageHeightPts
+                                                        drawRect(
+                                                            color = AmberAccent.copy(alpha = 0.35f),
+                                                            topLeft = Offset(
+                                                                rendered.left + rect.left * scaleX,
+                                                                rendered.top + rect.top * scaleY
+                                                            ),
+                                                            size = Size(
+                                                                (rect.right - rect.left) * scaleX,
+                                                                (rect.bottom - rect.top) * scaleY
+                                                            )
+                                                        )
                                                     }
                                                 }
-                                            })
-                                            .onLoad { _ ->
-                                                isLoading = false
-                                                runtimeOpenError = null
-                                                if (showPasswordPrompt) showPasswordPrompt = false
                                             }
-                                            .onError { throwable ->
-                                                isLoading = false
-                                                val message = throwable.message.orEmpty()
-                                                val encrypted = isLikelyEncryptedPdf(message)
-                                                if (encrypted) {
-                                                    showPasswordPrompt = true
-                                                } else {
-                                                    runtimeOpenError = userMessageForPdfLoadFailure(throwable)
-                                                    showControls = true
-                                                }
-                                            }
-                                            .enableSwipe(true)
-                                            .enableDoubletap(true)
-                                            .enableAnnotationRendering(false)
-                                            .onDrawAll { canvas, pageWidth, pageHeight, displayedPage ->
-                                                val data = highlightDrawRef.get() ?: return@onDrawAll
-                                                if (data.pageIndex != displayedPage || data.pageWidthPts <= 0f) return@onDrawAll
-                                                val scaleX = pageWidth / data.pageWidthPts
-                                                val scaleY = pageHeight / data.pageHeightPts
-                                                for (rect in data.rects) {
-                                                    canvas.drawRect(
-                                                        rect.left * scaleX, rect.top * scaleY,
-                                                        rect.right * scaleX, rect.bottom * scaleY,
-                                                        data.paint,
-                                                    )
-                                                }
-                                            }
-                                            .load()
-                                    }.onFailure { throwable ->
-                                        isLoading = false
-                                        val message = throwable.message.orEmpty()
-                                        val encrypted = isLikelyEncryptedPdf(message)
-                                        if (encrypted) {
-                                            showPasswordPrompt = true
                                         } else {
-                                            runtimeOpenError = userMessageForPdfLoadFailure(throwable)
-                                            showControls = true
+                                            CircularProgressIndicator(Modifier.align(Alignment.Center))
                                         }
                                     }
                                 }
-                            },
-                            modifier = Modifier.fillMaxSize(),
-                        )
+                                if (scrollHorizontal) {
+                                    HorizontalPager(state = pagerState, userScrollEnabled = pagerScrollEnabled, modifier = Modifier.fillMaxSize(), key = { it }, pageSpacing = 2.dp) { pageIndex ->
+                                        pageContent(pageIndex)
+                                    }
+                                } else {
+                                    VerticalPager(state = pagerState, userScrollEnabled = pagerScrollEnabled, modifier = Modifier.fillMaxSize(), key = { it }, pageSpacing = 2.dp) { pageIndex ->
+                                        pageContent(pageIndex)
+                                    }
+                                }
+                                if (pageCount > 1) {
+                                    val scrollPos = pagerState.currentPage.toFloat() / (pageCount - 1).toFloat()
+                                    val thumbFraction = (1f / pageCount).coerceAtLeast(0.04f)
+                                    val spaceBefore = (scrollPos * (1f - thumbFraction)).coerceIn(0f, 1f - thumbFraction)
+                                    val spaceAfter = (1f - thumbFraction - spaceBefore).coerceAtLeast(0f)
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.CenterEnd)
+                                            .padding(end = 2.dp)
+                                            .width(3.dp)
+                                            .fillMaxHeight(0.7f),
+                                    ) {
+                                        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f), RoundedCornerShape(2.dp)))
+                                        Column(Modifier.fillMaxSize()) {
+                                            if (spaceBefore > 0.001f) Spacer(Modifier.weight(spaceBefore))
+                                            Box(Modifier.fillMaxWidth().weight(thumbFraction).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.55f), RoundedCornerShape(2.dp)))
+                                            if (spaceAfter > 0.001f) Spacer(Modifier.weight(spaceAfter))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        pager()
                     } else {
                         val errorText = runtimeOpenError ?: openErrorMsg ?: "Unable to open this PDF."
                         val canRetry = errorText.contains("too much memory", ignoreCase = true)
@@ -525,12 +650,12 @@ fun PdfViewerScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     ZoomButton(icon = { Icon(Icons.Default.Add, contentDescription = "Zoom in") }) {
-                        pdfView?.let { v -> v.zoomWithAnimation((v.zoom * ZOOM_STEP).coerceAtMost(ZOOM_MAX)) }
+                        zoomInClicks++
                         showControls = true
                         controlsTouchTick++
                     }
                     ZoomButton(icon = { Icon(Icons.Default.Remove, contentDescription = "Zoom out") }) {
-                        pdfView?.let { v -> v.zoomWithAnimation((v.zoom / ZOOM_STEP).coerceAtLeast(ZOOM_MIN)) }
+                        zoomOutClicks++
                         showControls = true
                         controlsTouchTick++
                     }
@@ -589,9 +714,9 @@ fun PdfViewerScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                            if (pageCount.intValue > 0) {
+                            if (pageCount > 0) {
                                 Text(
-                                    text = "p. ${displayPage.intValue + 1} of ${pageCount.intValue}",
+                                    text = "p. ${displayPage.intValue + 1} of ${pageCount}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     modifier = Modifier.clickable {
@@ -612,14 +737,30 @@ fun PdfViewerScreen(
                         }) {
                             Icon(Icons.Default.Search, contentDescription = "Search in document", tint = if (isViewerSearchActive) AmberAccent else MaterialTheme.colorScheme.onSurface)
                         }
-                        IconButton(onClick = { showPageJump = true; controlsTouchTick++ }) {
-                            Icon(Icons.Default.Pin, contentDescription = "Go to page")
-                        }
-                        IconButton(onClick = { showBrightnessSlider = !showBrightnessSlider; controlsTouchTick++ }) {
-                            Icon(Icons.Default.BrightnessMedium, contentDescription = "Brightness", tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurface)
-                        }
-                        IconButton(onClick = { viewModel.toggleScrollMode(); controlsTouchTick++ }) {
-                            Icon(imageVector = if (scrollHorizontal) Icons.Default.SwapVert else Icons.Default.SwapHoriz, contentDescription = null)
+                        Box {
+                            IconButton(onClick = { showOverflowMenu = true; controlsTouchTick++ }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                            }
+                            DropdownMenu(
+                                expanded = showOverflowMenu,
+                                onDismissRequest = { showOverflowMenu = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Go to page") },
+                                    leadingIcon = { Icon(Icons.Default.Pin, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                    onClick = { showOverflowMenu = false; showPageJump = true; controlsTouchTick++ },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Brightness") },
+                                    leadingIcon = { Icon(Icons.Default.BrightnessMedium, contentDescription = null, modifier = Modifier.size(20.dp), tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurface) },
+                                    onClick = { showOverflowMenu = false; showBrightnessSlider = !showBrightnessSlider; controlsTouchTick++ },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (scrollHorizontal) "Vertical scroll" else "Horizontal scroll") },
+                                    leadingIcon = { Icon(if (scrollHorizontal) Icons.Default.SwapVert else Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                    onClick = { showOverflowMenu = false; viewModel.toggleScrollMode(); controlsTouchTick++ },
+                                )
+                            }
                         }
                     }
                     AnimatedVisibility(visible = isViewerSearchActive, enter = expandVertically(), exit = shrinkVertically()) {
@@ -737,6 +878,44 @@ fun PdfViewerScreen(
 private fun isLikelyEncryptedPdf(message: String): Boolean =
     message.contains("password", ignoreCase = true) || message.contains("encrypted", ignoreCase = true)
 
+private fun renderedPageRect(
+    viewportWidth: Float,
+    viewportHeight: Float,
+    bitmap: android.graphics.Bitmap?,
+    scale: Float,
+    offsetX: Float,
+    offsetY: Float,
+): Rect? {
+    if (bitmap == null || viewportWidth <= 0f || viewportHeight <= 0f) return null
+    val fitScale = minOf(
+        viewportWidth / bitmap.width.toFloat(),
+        viewportHeight / bitmap.height.toFloat(),
+    )
+    val drawWidth = bitmap.width * fitScale * scale
+    val drawHeight = bitmap.height * fitScale * scale
+    val left = (viewportWidth - drawWidth) / 2f + offsetX
+    val top = (viewportHeight - drawHeight) / 2f + offsetY
+    return Rect(left, top, left + drawWidth, top + drawHeight)
+}
+
+private fun clampPanOffset(
+    viewportWidth: Float,
+    viewportHeight: Float,
+    bitmap: android.graphics.Bitmap?,
+    scale: Float,
+    offsetX: Float,
+    offsetY: Float,
+): PanOffset {
+    val rect = renderedPageRect(viewportWidth, viewportHeight, bitmap, scale, 0f, 0f)
+        ?: return PanOffset(0f, 0f)
+    val maxX = ((rect.width - viewportWidth) / 2f).coerceAtLeast(0f)
+    val maxY = ((rect.height - viewportHeight) / 2f).coerceAtLeast(0f)
+    return PanOffset(
+        x = offsetX.coerceIn(-maxX, maxX),
+        y = offsetY.coerceIn(-maxY, maxY),
+    )
+}
+
 private fun userMessageForPdfLoadFailure(throwable: Throwable): String {
     if (throwable is OutOfMemoryError) {
         return "This PDF requires too much memory to display. Close other apps and try again, or view it on a PC if it contains many high-resolution scanned pages."
@@ -748,34 +927,6 @@ private fun userMessageForPdfLoadFailure(throwable: Throwable): String {
         return "This PDF requires too much memory to display. Close other apps and try again, or view it on a PC if it contains many high-resolution scanned pages."
     }
     return if (message.isNotBlank()) message else "Unable to open this PDF."
-}
-
-private fun handlePdfLinkTap(
-    event: LinkTapEvent,
-    context: android.content.Context,
-    pdfView: PDFView,
-    onExternalLinkError: () -> Unit,
-) {
-    val uri = event.link?.uri
-    if (!uri.isNullOrBlank()) {
-        val normalized = if (uri.startsWith("http://", ignoreCase = true) || uri.startsWith("https://", ignoreCase = true)) {
-            uri
-        } else {
-            "https://$uri"
-        }
-        try {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(normalized)).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-            )
-        } catch (_: ActivityNotFoundException) {
-            onExternalLinkError()
-        }
-        return
-    }
-    // Keep internal PDF link behavior (jump to destination/page) intact.
-    DefaultLinkHandler(pdfView).handleLinkEvent(event)
 }
 
 @Composable
@@ -817,13 +968,18 @@ private fun PdfErrorScreen(
 }
 
 @Composable
-private fun ZoomButton(icon: @Composable () -> Unit, onClick: () -> Unit) {
+private fun ZoomButton(
+    icon: @Composable () -> Unit,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     Surface(
         onClick = onClick,
         shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f),
-        shadowElevation = 4.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 0.92f else 0.45f),
+        shadowElevation = if (enabled) 4.dp else 0.dp,
         modifier = Modifier.size(44.dp),
+        enabled = enabled,
     ) {
         Box(contentAlignment = Alignment.Center) { icon() }
     }

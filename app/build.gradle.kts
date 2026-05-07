@@ -95,8 +95,8 @@ dependencies {
     // OCR fallback for Arabic, Cyrillic (traineddata downloaded to device on demand)
     implementation(libs.tesseract4android)
 
-    // PDF viewer — PDFium-backed
-    implementation(libs.android.pdf.viewer)
+    // PDF viewer — MuPDF fitz (AGPL, tiled, no OOM)
+    implementation(libs.mupdf.fitz)
 
     // Testing
     testImplementation(libs.junit)

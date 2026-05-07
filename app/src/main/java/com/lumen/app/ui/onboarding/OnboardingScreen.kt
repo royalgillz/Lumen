@@ -119,15 +119,10 @@ fun OnboardingScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(
+            LumenBrandIcon(
                 modifier = Modifier
-                    .size(30.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                LumenBrandIcon()
-            }
+                    .size(32.dp)
+            )
             Text(
                 text = "Welcome to Lumen",
                 style = MaterialTheme.typography.titleMedium,

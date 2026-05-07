@@ -1,6 +1,8 @@
 package com.lumen.app.ui.viewer
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.PointF
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -11,11 +13,14 @@ import com.lumen.app.data.repository.SearchRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -85,6 +90,12 @@ class PdfViewerViewModel @Inject constructor(
     val viewerMatchIndex = MutableStateFlow(0)
 
     private var inDocSearchJob: Job? = null
+    private val _pageCount = MutableStateFlow(0)
+    val pageCount: StateFlow<Int> = _pageCount
+    private val rendererMutex = Mutex()
+    private var rendererSession: MuPdfPageRenderer? = null
+    private var rendererUri: String? = null
+    private var rendererPassword: String? = null
 
     fun searchInDocument(docUri: String, rawQuery: String) {
         if (rawQuery.isBlank() || rawQuery.trim().length < 2) {
@@ -134,6 +145,70 @@ class PdfViewerViewModel @Inject constructor(
 
     suspend fun getLastPage(uri: String): Int? = safRepository.getLastPage(uri)
 
+    suspend fun renderPage(
+        uri: String,
+        index: Int,
+        widthPx: Int,
+        password: String? = null,
+    ): Bitmap? {
+        return withContext(Dispatchers.IO) {
+            rendererMutex.withLock {
+                try {
+                    ensureRendererLocked(uri, password)
+                    val count = rendererSession?.pageCount() ?: 0
+                    if (index !in 0 until count) return@withLock null
+                    rendererSession?.renderPage(index, widthPx)
+                } catch (_: OutOfMemoryError) {
+                    null
+                } catch (_: IndexOutOfBoundsException) {
+                    null
+                }
+            }
+        }
+    }
+
+    suspend fun getLinks(uri: String, index: Int, password: String? = null): List<MuLink> {
+        return withContext(Dispatchers.IO) {
+            rendererMutex.withLock {
+                try {
+                    ensureRendererLocked(uri, password)
+                    val count = rendererSession?.pageCount() ?: 0
+                    if (index !in 0 until count) return@withLock emptyList()
+                    rendererSession?.getLinks(index).orEmpty()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            }
+        }
+    }
+
+    suspend fun getPageSize(uri: String, index: Int, password: String? = null): PointF? {
+        return withContext(Dispatchers.IO) {
+            rendererMutex.withLock {
+                try {
+                    ensureRendererLocked(uri, password)
+                    val count = rendererSession?.pageCount() ?: 0
+                    if (index !in 0 until count) return@withLock null
+                    rendererSession?.pageSize(index)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+    }
+
+    suspend fun closeRendererSession() {
+        withContext(Dispatchers.IO) {
+            rendererMutex.withLock {
+                rendererSession?.close()
+                rendererSession = null
+                rendererUri = null
+                rendererPassword = null
+                _pageCount.value = 0
+            }
+        }
+    }
+
     private fun canSafelyComputeHighlights(uri: Uri): Boolean {
         val resolver = getApplication<Application>().contentResolver
         val length = runCatching {
@@ -143,5 +218,30 @@ class PdfViewerViewModel @Inject constructor(
             }
         }.getOrNull()
         return length?.let { it <= MAX_HIGHLIGHT_PDF_BYTES } ?: true
+    }
+
+    private fun ensureRendererLocked(uri: String, password: String?) {
+        if (rendererSession != null && rendererUri == uri && rendererPassword == password) return
+        rendererSession?.close()
+        val parsedUri = Uri.parse(uri)
+        val pfd = getApplication<Application>().contentResolver.openFileDescriptor(parsedUri, "r")
+            ?: throw IllegalStateException("Unable to open PDF.")
+        val renderer = MuPdfPageRenderer()
+        try {
+            renderer.open(pfd, password)
+        } catch (t: Throwable) {
+            runCatching { pfd.close() }
+            throw t
+        }
+        rendererSession = renderer
+        rendererUri = uri
+        rendererPassword = password
+        _pageCount.value = renderer.pageCount()
+    }
+
+    override fun onCleared() {
+        rendererSession?.close()
+        rendererSession = null
+        super.onCleared()
     }
 }

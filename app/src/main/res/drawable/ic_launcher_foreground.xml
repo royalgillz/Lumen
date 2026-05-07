@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/lumen_icon_512"
-    android:gravity="center" />
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/lumen_icon_512"
+    android:insetLeft="12dp"
+    android:insetTop="12dp"
+    android:insetRight="12dp"
+    android:insetBottom="12dp" />
