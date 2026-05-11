@@ -1,8 +1,6 @@
 package com.lumen.app.ui.viewer
 
 import android.app.Application
-import android.graphics.Bitmap
-import android.graphics.PointF
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,14 +11,12 @@ import com.lumen.app.data.repository.SearchRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -30,9 +26,94 @@ class PdfViewerViewModel @Inject constructor(
     private val searchRepository: SearchRepository,
     private val safRepository: SafRepository,
 ) : AndroidViewModel(application) {
+
     private companion object {
-        // Highlights use PDFBox parsing; skip on very large files to avoid OOM.
-        private const val MAX_HIGHLIGHT_PDF_BYTES = 25L * 1024L * 1024L
+        /** Skip highlight computation for PDFs above this size — they OOM on
+         *  mid-range devices even with MuPDF's incremental parser. */
+        private const val MAX_HIGHLIGHT_PDF_BYTES = 50L * 1024L * 1024L
+    }
+
+    // ── Document lifecycle ────────────────────────────────────────────────────
+
+    sealed class DocumentState {
+        object Idle : DocumentState()
+        object Loading : DocumentState()
+        data class Loaded(val renderer: MuPdfPageRenderer) : DocumentState()
+        object NeedsPassword : DocumentState()
+        data class Failed(val message: String) : DocumentState()
+    }
+
+    private val _documentState = MutableStateFlow<DocumentState>(DocumentState.Idle)
+    val documentState: StateFlow<DocumentState> = _documentState.asStateFlow()
+
+    private var openJob: Job? = null
+    private var currentRenderer: MuPdfPageRenderer? = null
+    private var lastOpenedUri: String? = null
+    private var lastOpenedPassword: String? = null
+
+    fun openDocument(uriString: String, password: String? = null) {
+        openJob?.cancel()
+        val parsedUri = try {
+            Uri.parse(uriString)
+        } catch (_: Throwable) {
+            _documentState.value = DocumentState.Failed("Unable to open this PDF — the link is invalid.")
+            return
+        }
+        // Same URI + same password + already-loaded → no-op
+        if (uriString == lastOpenedUri && password == lastOpenedPassword &&
+            _documentState.value is DocumentState.Loaded) {
+            return
+        }
+        lastOpenedUri = uriString
+        lastOpenedPassword = password
+        _documentState.value = DocumentState.Loading
+        openJob = viewModelScope.launch(Dispatchers.IO) {
+            // Drop any prior session.
+            val prior = currentRenderer
+            currentRenderer = null
+            prior?.close()
+            when (val res = MuPdfPageRenderer.open(getApplication(), parsedUri, password)) {
+                is MuPdfPageRenderer.OpenResult.Ok -> {
+                    currentRenderer = res.renderer
+                    _documentState.value = DocumentState.Loaded(res.renderer)
+                }
+                MuPdfPageRenderer.OpenResult.NeedsPassword -> {
+                    _documentState.value = DocumentState.NeedsPassword
+                }
+                is MuPdfPageRenderer.OpenResult.Error -> {
+                    _documentState.value = DocumentState.Failed(
+                        userMessageForOpenFailure(res.cause)
+                    )
+                }
+            }
+        }
+    }
+
+    fun retry() {
+        val uri = lastOpenedUri ?: return
+        openDocument(uri, lastOpenedPassword)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        openJob?.cancel()
+        currentRenderer?.close()
+        currentRenderer = null
+    }
+
+    private fun userMessageForOpenFailure(cause: Throwable?): String {
+        if (cause is OutOfMemoryError) return OOM_MESSAGE
+        val msg = cause?.message.orEmpty()
+        if (msg.contains("Failed to allocate", ignoreCase = true) ||
+            msg.contains("OutOfMemory", ignoreCase = true) ||
+            msg.contains("OOM", ignoreCase = true)) return OOM_MESSAGE
+        if (msg.contains("permission", ignoreCase = true)) {
+            return "Permission denied.\nGo to Library, remove this folder, and re-add it to restore access."
+        }
+        if (msg.contains("FileNotFound", ignoreCase = true) || msg.contains("No such file", ignoreCase = true)) {
+            return "File not found.\nThis PDF may have been moved or deleted."
+        }
+        return if (msg.isNotBlank()) msg else "Unable to open this PDF."
     }
 
     // ── Keyword highlights ────────────────────────────────────────────────────
@@ -60,11 +141,8 @@ class PdfViewerViewModel @Inject constructor(
         highlightJob?.cancel()
         highlightJob = viewModelScope.launch(Dispatchers.IO) {
             _highlights.value = null
-            val stream = try {
-                getApplication<Application>().contentResolver.openInputStream(parsedUri)
-            } catch (_: Exception) { null } ?: return@launch
             _highlights.value = try {
-                stream.use { pdfHighlighter.findOnPage(it, pageIndex, keyword, pdfPassword) }
+                pdfHighlighter.findOnPage(parsedUri, pageIndex, keyword, pdfPassword)
             } catch (_: OutOfMemoryError) {
                 null
             } catch (_: Exception) {
@@ -90,12 +168,6 @@ class PdfViewerViewModel @Inject constructor(
     val viewerMatchIndex = MutableStateFlow(0)
 
     private var inDocSearchJob: Job? = null
-    private val _pageCount = MutableStateFlow(0)
-    val pageCount: StateFlow<Int> = _pageCount
-    private val rendererMutex = Mutex()
-    private var rendererSession: MuPdfPageRenderer? = null
-    private var rendererUri: String? = null
-    private var rendererPassword: String? = null
 
     fun searchInDocument(docUri: String, rawQuery: String) {
         if (rawQuery.isBlank() || rawQuery.trim().length < 2) {
@@ -145,70 +217,6 @@ class PdfViewerViewModel @Inject constructor(
 
     suspend fun getLastPage(uri: String): Int? = safRepository.getLastPage(uri)
 
-    suspend fun renderPage(
-        uri: String,
-        index: Int,
-        widthPx: Int,
-        password: String? = null,
-    ): Bitmap? {
-        return withContext(Dispatchers.IO) {
-            rendererMutex.withLock {
-                try {
-                    ensureRendererLocked(uri, password)
-                    val count = rendererSession?.pageCount() ?: 0
-                    if (index !in 0 until count) return@withLock null
-                    rendererSession?.renderPage(index, widthPx)
-                } catch (_: OutOfMemoryError) {
-                    null
-                } catch (_: IndexOutOfBoundsException) {
-                    null
-                }
-            }
-        }
-    }
-
-    suspend fun getLinks(uri: String, index: Int, password: String? = null): List<MuLink> {
-        return withContext(Dispatchers.IO) {
-            rendererMutex.withLock {
-                try {
-                    ensureRendererLocked(uri, password)
-                    val count = rendererSession?.pageCount() ?: 0
-                    if (index !in 0 until count) return@withLock emptyList()
-                    rendererSession?.getLinks(index).orEmpty()
-                } catch (_: Exception) {
-                    emptyList()
-                }
-            }
-        }
-    }
-
-    suspend fun getPageSize(uri: String, index: Int, password: String? = null): PointF? {
-        return withContext(Dispatchers.IO) {
-            rendererMutex.withLock {
-                try {
-                    ensureRendererLocked(uri, password)
-                    val count = rendererSession?.pageCount() ?: 0
-                    if (index !in 0 until count) return@withLock null
-                    rendererSession?.pageSize(index)
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        }
-    }
-
-    suspend fun closeRendererSession() {
-        withContext(Dispatchers.IO) {
-            rendererMutex.withLock {
-                rendererSession?.close()
-                rendererSession = null
-                rendererUri = null
-                rendererPassword = null
-                _pageCount.value = 0
-            }
-        }
-    }
-
     private fun canSafelyComputeHighlights(uri: Uri): Boolean {
         val resolver = getApplication<Application>().contentResolver
         val length = runCatching {
@@ -219,29 +227,8 @@ class PdfViewerViewModel @Inject constructor(
         }.getOrNull()
         return length?.let { it <= MAX_HIGHLIGHT_PDF_BYTES } ?: true
     }
-
-    private fun ensureRendererLocked(uri: String, password: String?) {
-        if (rendererSession != null && rendererUri == uri && rendererPassword == password) return
-        rendererSession?.close()
-        val parsedUri = Uri.parse(uri)
-        val pfd = getApplication<Application>().contentResolver.openFileDescriptor(parsedUri, "r")
-            ?: throw IllegalStateException("Unable to open PDF.")
-        val renderer = MuPdfPageRenderer()
-        try {
-            renderer.open(pfd, password)
-        } catch (t: Throwable) {
-            runCatching { pfd.close() }
-            throw t
-        }
-        rendererSession = renderer
-        rendererUri = uri
-        rendererPassword = password
-        _pageCount.value = renderer.pageCount()
-    }
-
-    override fun onCleared() {
-        rendererSession?.close()
-        rendererSession = null
-        super.onCleared()
-    }
 }
+
+private const val OOM_MESSAGE =
+    "This PDF requires too much memory to display. Close other apps and try again, " +
+        "or view it on a PC if it contains many high-resolution scanned pages."

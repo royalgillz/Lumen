@@ -43,7 +43,8 @@ class MuPdfPageRenderer private constructor(
         val bounds: RectF,
         val uri: String,
         val isExternal: Boolean,
-        internal val raw: Link,
+        /** Pre-resolved 0-indexed page number for internal links; null for external or unresolvable. */
+        val destPage: Int?,
     )
 
     suspend fun pageSize(index: Int): SizeF? {
@@ -110,34 +111,27 @@ class MuPdfPageRenderer private constructor(
                 links.mapNotNull { link ->
                     val bounds = link?.bounds ?: return@mapNotNull null
                     val uri = link.uri.orEmpty()
+                    val external = isExternalUri(uri)
+                    // Resolve internal link destinations while the page is still alive —
+                    // MuPDF's Link references can become unsafe after page.destroy().
+                    val destPage = if (!external) {
+                        runCatching {
+                            val loc = doc.resolveLink(link) ?: return@runCatching null
+                            val n = doc.pageNumberFromLocation(loc)
+                            if (n in 0 until pageCount) n else null
+                        }.getOrNull()
+                    } else null
                     LinkInfo(
                         bounds = RectF(bounds.x0, bounds.y0, bounds.x1, bounds.y1),
                         uri = uri,
-                        isExternal = isExternalUri(uri),
-                        raw = link,
+                        isExternal = external,
+                        destPage = destPage,
                     )
                 }
             } finally {
                 page.destroy()
             }
         } ?: emptyList()
-    }
-
-    /**
-     * Resolve an internal-link target to a 0-indexed page number, or null if the
-     * link is external or unresolvable.
-     */
-    suspend fun resolveLinkPage(link: LinkInfo): Int? {
-        if (link.isExternal) return null
-        return withDocLock {
-            try {
-                val loc = doc.resolveLink(link.raw) ?: return@withDocLock null
-                val pageNum = doc.pageNumberFromLocation(loc)
-                if (pageNum in 0 until pageCount) pageNum else null
-            } catch (_: Throwable) {
-                null
-            }
-        }
     }
 
     override fun close() {

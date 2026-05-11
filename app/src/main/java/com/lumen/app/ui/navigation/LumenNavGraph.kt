@@ -32,8 +32,8 @@ import com.lumen.app.ui.icons.SettingsTabIcon
 import com.lumen.app.ui.search.SearchScreen
 import com.lumen.app.ui.settings.SettingsScreen
 import androidx.compose.material3.MaterialTheme
-import com.lumen.app.ui.viewer.PdfViewerScreen
 import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.viewer.PdfViewerScreen
 
 sealed class Screen(val route: String) {
     data object Onboarding : Screen("onboarding")
@@ -46,9 +46,9 @@ sealed class Screen(val route: String) {
 private const val PDF_VIEWER_ROUTE =
     "pdf_viewer?uri={uri}&page={page}&filename={filename}&keyword={keyword}"
 
-fun pdfViewerRoute(uri: String, page: Int, filename: String, keyword: String = ""): String =
+private fun pdfViewerRoute(uri: String, page: Int, filename: String, keyword: String = ""): String =
     "pdf_viewer?uri=${Uri.encode(uri)}&page=$page" +
-    "&filename=${Uri.encode(filename)}&keyword=${Uri.encode(keyword)}"
+        "&filename=${Uri.encode(filename)}&keyword=${Uri.encode(keyword)}"
 
 private data class Tab(val screen: Screen, val label: String, val icon: @Composable (Boolean) -> Unit)
 
@@ -80,8 +80,9 @@ fun LumenNavGraph(
         val uri = externalPdfUri ?: return@LaunchedEffect
         if (handledExternalUri.value == uri) return@LaunchedEffect
         handledExternalUri.value = uri
-        val filename = runCatching { Uri.parse(uri).lastPathSegment }.getOrNull().orEmpty().ifBlank { "PDF" }
-        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename, keyword = "")) {
+        val filename = runCatching { Uri.parse(uri).lastPathSegment }
+            .getOrNull().orEmpty().ifBlank { "PDF" }
+        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename)) {
             launchSingleTop = true
         }
     }
@@ -152,8 +153,8 @@ fun LumenNavGraph(
             composable(Screen.Library.route) {
                 LibraryScreen(
                     onOpenDocument = { uri, filename ->
-                        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename, keyword = ""))
-                    }
+                        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename))
+                    },
                 )
             }
             composable(Screen.Settings.route) { SettingsScreen() }
