@@ -2,11 +2,15 @@ package com.lumen.app.data.pdf
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import com.artifex.mupdf.fitz.ColorSpace
+import com.artifex.mupdf.fitz.Document
+import com.artifex.mupdf.fitz.Matrix
+import com.artifex.mupdf.fitz.Page
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -15,62 +19,84 @@ class PdfPageRenderer @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     /**
-     * Renders [pageIndex] (0-based) of the PDF at [uri] to a Bitmap at [dpi] resolution.
-     * Uses ParcelFileDescriptor so no copy of the file is made.
-     * Returns null on any failure.
+     * Renders [pageIndex] (0-based) of the PDF at [uri] to a Bitmap at [dpi]
+     * resolution via MuPDF. Returns null on any failure.
+     *
+     * Reads the file in place via SAF + a seekable PFD wrapper — no copy is made.
      */
     suspend fun renderPage(uri: Uri, pageIndex: Int, dpi: Int = 120): Bitmap? =
         withContext(Dispatchers.IO) {
-            try {
-                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                    PdfRenderer(pfd).use { renderer ->
-                        if (pageIndex >= renderer.pageCount) return@withContext null
-                        renderBitmap(renderer, pageIndex, dpi)
-                    }
-                }
-            } catch (e: Exception) {
-                null
+            withMuPdfDocument(context, uri) { doc ->
+                if (pageIndex !in 0 until doc.countPages()) return@withMuPdfDocument null
+                renderPageInternal(doc, pageIndex, dpi)
             }
         }
 
     /**
-     * Opens the PDF once and calls [onPage] for each index in [pageIndices] in order.
-     * The bitmap passed to [onPage] is recycled immediately after it returns, do not
-     * hold a reference past the callback.
+     * Opens the PDF once and calls [onPage] for each index in [pageIndices] in
+     * order. The bitmap passed to [onPage] is recycled immediately after the
+     * callback returns; do not retain it.
      */
     suspend fun renderPagesInSession(
         uri: Uri,
         pageIndices: List<Int>,
         dpi: Int = 120,
         onPage: suspend (pageIndex: Int, bitmap: Bitmap) -> Unit,
-    ) = withContext(Dispatchers.IO) {
-        try {
-            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                PdfRenderer(pfd).use { renderer ->
-                    for (pageIndex in pageIndices) {
-                        if (pageIndex >= renderer.pageCount) continue
-                        val bitmap = renderBitmap(renderer, pageIndex, dpi) ?: continue
-                        try {
-                            onPage(pageIndex, bitmap)
-                        } finally {
-                            bitmap.recycle()
-                        }
+    ) {
+        if (pageIndices.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            withMuPdfDocument(context, uri) { doc ->
+                val count = doc.countPages()
+                for (pageIndex in pageIndices) {
+                    if (pageIndex !in 0 until count) continue
+                    val bitmap = renderPageInternal(doc, pageIndex, dpi) ?: continue
+                    try {
+                        onPage(pageIndex, bitmap)
+                    } finally {
+                        bitmap.recycle()
                     }
                 }
             }
-        } catch (_: Exception) {}
+        }
     }
 
-    private fun renderBitmap(renderer: PdfRenderer, pageIndex: Int, dpi: Int): Bitmap? {
+    private suspend fun renderPageInternal(doc: Document, pageIndex: Int, dpi: Int): Bitmap? {
+        val page: Page = try {
+            doc.loadPage(pageIndex)
+        } catch (_: Throwable) {
+            return null
+        }
         return try {
-            renderer.openPage(pageIndex).use { page ->
-                val scale = dpi / 72f
-                val width = (page.width * scale).toInt().coerceAtLeast(1)
-                val height = (page.height * scale).toInt().coerceAtLeast(1)
-                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                bitmap
+            val scale = dpi / 72f
+            val matrix = Matrix(scale, scale)
+            val pixmap = try {
+                page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
+            } catch (_: OutOfMemoryError) {
+                return null
+            } catch (_: Throwable) {
+                return null
+            } ?: return null
+            try {
+                val w = pixmap.width
+                val h = pixmap.height
+                if (w <= 0 || h <= 0) return null
+                val samples = pixmap.samples ?: return null
+                val expected = w * h * 4
+                if (samples.size < expected) return null
+                val bmp = try {
+                    Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                } catch (_: OutOfMemoryError) {
+                    return null
+                }
+                bmp.copyPixelsFromBuffer(ByteBuffer.wrap(samples, 0, expected))
+                bmp
+            } finally {
+                runCatching { pixmap.destroy() }
             }
-        } catch (_: Exception) { null }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { page.destroy() }
+        }
     }
 }

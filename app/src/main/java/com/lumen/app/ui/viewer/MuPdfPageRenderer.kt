@@ -1,169 +1,228 @@
 package com.lumen.app.ui.viewer
 
+import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.PointF
 import android.graphics.RectF
-import android.os.ParcelFileDescriptor
+import android.net.Uri
+import android.util.SizeF
 import com.artifex.mupdf.fitz.ColorSpace
 import com.artifex.mupdf.fitz.Document
-import com.artifex.mupdf.fitz.DrawDevice
+import com.artifex.mupdf.fitz.Link
 import com.artifex.mupdf.fitz.Matrix
-import com.artifex.mupdf.fitz.Pixmap
-import com.artifex.mupdf.fitz.SeekableInputStream
-import com.artifex.mupdf.fitz.SeekableStream
-import java.io.FileInputStream
-import java.io.IOException
-import java.nio.channels.FileChannel
-import kotlin.math.max
-import kotlin.math.roundToInt
+import com.artifex.mupdf.fitz.Page
+import com.artifex.mupdf.fitz.Rect
+import com.lumen.app.data.pdf.PfdSeekableStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 
-data class MuLink(
-    val bounds: RectF,
-    val uri: String?,
-    val pageTarget: Int?,
-)
+/**
+ * Long-lived MuPDF session for the viewer.
+ *
+ * Holds one open [Document] (backed by a [PfdSeekableStream] over a SAF URI) and
+ * exposes coroutine-friendly APIs to render pages, query layout, and traverse
+ * links. MuPDF's fitz documents are not thread-safe, so all access is serialised
+ * through an internal [Mutex].
+ *
+ * The session is created via [open]; the caller is responsible for [close]-ing
+ * it when the viewer is destroyed.
+ */
+class MuPdfPageRenderer private constructor(
+    private val stream: PfdSeekableStream,
+    private val doc: Document,
+    val pageCount: Int,
+) : AutoCloseable {
 
-class MuPdfPageRenderer {
-    private var document: Document? = null
-    private var activeStream: PfdSeekableInputStream? = null
-    /** Must stay open until [close]; closing early breaks MuPDF's seekable stream. */
-    private var heldPfd: ParcelFileDescriptor? = null
+    private val mutex = Mutex()
+    private val pageBoundsCache: Array<SizeF?> = arrayOfNulls(pageCount)
+    @Volatile private var closed = false
 
-    fun open(pfd: ParcelFileDescriptor, password: String? = null) {
-        close()
-        heldPfd = pfd
-        val stream = PfdSeekableInputStream(pfd)
-        val doc = try {
-            Document.openDocument(stream, "application/pdf")
-        } catch (t: Throwable) {
-            stream.close()
-            throw t
-        }
-        if (doc.needsPassword()) {
-            val isValidPassword = !password.isNullOrBlank() && doc.authenticatePassword(password)
-            if (!isValidPassword) {
-                doc.destroy()
-                stream.close()
-                throw SecurityException("Password required or incorrect.")
-            }
-        }
-        activeStream = stream
-        document = doc
-    }
+    data class LinkInfo(
+        val bounds: RectF,
+        val uri: String,
+        val isExternal: Boolean,
+        internal val raw: Link,
+    )
 
-    fun pageCount(): Int = document?.countPages() ?: 0
-
-    fun renderPage(index: Int, widthPx: Int): Bitmap {
-        val doc = requireNotNull(document) { "Document is not open." }
-        val page = doc.loadPage(index)
-        try {
-            val bounds = page.bounds
-            val pageWidthPts = (bounds.x1 - bounds.x0).coerceAtLeast(1f)
-            val pageHeightPts = (bounds.y1 - bounds.y0).coerceAtLeast(1f)
-            val scale = max(widthPx, 1).toFloat() / pageWidthPts
-            val bitmapWidth = max(widthPx, 1)
-            val bitmapHeight = (pageHeightPts * scale).roundToInt().coerceAtLeast(1)
-            // DeviceBGR + alpha gives BGRA samples; getPixels() matches Android ARGB_8888 ints.
-            // (DeviceRGB pixmap pixels were RGBA and were previously misread as ARGB → swapped R/B.)
-            val pixmap = Pixmap(ColorSpace.DeviceBGR, bitmapWidth, bitmapHeight, true)
+    suspend fun pageSize(index: Int): SizeF? {
+        if (index !in 0 until pageCount) return null
+        pageBoundsCache[index]?.let { return it }
+        return withDocLock {
+            val page = runCatching { doc.loadPage(index) }.getOrNull() ?: return@withDocLock null
             try {
-                pixmap.clear(0xFFFFFFFF.toInt())
-                val matrix = Matrix(scale, 0f, 0f, scale, -bounds.x0 * scale, -bounds.y0 * scale)
-                val device = DrawDevice(pixmap)
-                try {
-                    page.run(device, matrix, null)
-                } finally {
-                    device.close()
-                    device.destroy()
-                }
-                val pixels = pixmap.pixels
-                return Bitmap.createBitmap(pixels, bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
+                val b: Rect = page.bounds
+                val size = SizeF(b.x1 - b.x0, b.y1 - b.y0)
+                pageBoundsCache[index] = size
+                size
             } finally {
-                pixmap.destroy()
+                page.destroy()
             }
-        } finally {
-            page.destroy()
         }
     }
 
-    fun getLinks(index: Int): List<MuLink> {
-        val doc = requireNotNull(document) { "Document is not open." }
-        val page = doc.loadPage(index)
-        try {
-            val links = page.links ?: return emptyList()
-            return links.map { link ->
-                val bounds = link.bounds
-                val uri = link.uri
-                val resolvedPage = runCatching {
-                    val location = doc.resolveLink(link)
-                    doc.pageNumberFromLocation(location)
-                }.getOrNull()
-                MuLink(
-                    bounds = RectF(bounds.x0, bounds.y0, bounds.x1, bounds.y1),
-                    uri = uri,
-                    pageTarget = parsePageTarget(uri) ?: resolvedPage,
-                )
+    /**
+     * Render [index] to a Bitmap. [scale] is the device-pixel multiplier on the
+     * page's point dimensions (e.g. 1.0 = 1px-per-pt, 2.0 = double resolution).
+     */
+    suspend fun renderPage(index: Int, scale: Float): Bitmap? {
+        if (index !in 0 until pageCount) return null
+        if (scale <= 0f) return null
+        return withDocLock {
+            val page = runCatching { doc.loadPage(index) }.getOrNull() ?: return@withDocLock null
+            try {
+                val matrix = Matrix(scale, scale)
+                val pixmap = runCatching {
+                    page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
+                }.getOrNull() ?: return@withDocLock null
+                try {
+                    val w = pixmap.width
+                    val h = pixmap.height
+                    if (w <= 0 || h <= 0) return@withDocLock null
+                    val samples = pixmap.samples ?: return@withDocLock null
+                    val expected = w * h * 4
+                    if (samples.size < expected) return@withDocLock null
+                    val bmp = try {
+                        Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    } catch (_: OutOfMemoryError) {
+                        return@withDocLock null
+                    }
+                    bmp.copyPixelsFromBuffer(ByteBuffer.wrap(samples, 0, expected))
+                    bmp
+                } finally {
+                    pixmap.destroy()
+                }
+            } catch (_: Throwable) {
+                null
+            } finally {
+                page.destroy()
             }
-        } finally {
-            page.destroy()
         }
     }
 
-    fun pageSize(index: Int): PointF {
-        val doc = requireNotNull(document) { "Document is not open." }
-        val page = doc.loadPage(index)
-        try {
-            val bounds = page.bounds
-            return PointF(bounds.x1 - bounds.x0, bounds.y1 - bounds.y0)
-        } finally {
-            page.destroy()
+    suspend fun linksForPage(index: Int): List<LinkInfo> {
+        if (index !in 0 until pageCount) return emptyList()
+        return withDocLock {
+            val page = runCatching { doc.loadPage(index) }.getOrNull() ?: return@withDocLock emptyList()
+            try {
+                val links = runCatching { page.links }.getOrNull() ?: return@withDocLock emptyList()
+                links.mapNotNull { link ->
+                    val bounds = link?.bounds ?: return@mapNotNull null
+                    val uri = link.uri.orEmpty()
+                    LinkInfo(
+                        bounds = RectF(bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+                        uri = uri,
+                        isExternal = isExternalUri(uri),
+                        raw = link,
+                    )
+                }
+            } finally {
+                page.destroy()
+            }
+        } ?: emptyList()
+    }
+
+    /**
+     * Resolve an internal-link target to a 0-indexed page number, or null if the
+     * link is external or unresolvable.
+     */
+    suspend fun resolveLinkPage(link: LinkInfo): Int? {
+        if (link.isExternal) return null
+        return withDocLock {
+            try {
+                val loc = doc.resolveLink(link.raw) ?: return@withDocLock null
+                val pageNum = doc.pageNumberFromLocation(loc)
+                if (pageNum in 0 until pageCount) pageNum else null
+            } catch (_: Throwable) {
+                null
+            }
         }
     }
 
-    fun close() {
-        document?.destroy()
-        document = null
-        activeStream?.close()
-        activeStream = null
-        runCatching { heldPfd?.close() }
-        heldPfd = null
+    override fun close() {
+        if (closed) return
+        closed = true
+        runCatching { doc.destroy() }
+        runCatching { stream.close() }
     }
 
-    private fun parsePageTarget(uri: String?): Int? {
-        if (uri.isNullOrBlank()) return null
-        val marker = "#page="
-        val markerIndex = uri.indexOf(marker, ignoreCase = true)
-        if (markerIndex < 0) return null
-        val raw = uri.substring(markerIndex + marker.length)
-            .takeWhile { it.isDigit() }
-        val pageOneBased = raw.toIntOrNull() ?: return null
-        return (pageOneBased - 1).coerceAtLeast(0)
+    private suspend fun <R> withDocLock(block: () -> R): R? {
+        if (closed) return null
+        return withContext(Dispatchers.IO) {
+            mutex.withLock {
+                if (closed) null else block()
+            }
+        }
     }
 
-    private class PfdSeekableInputStream(
-        pfd: ParcelFileDescriptor,
-    ) : SeekableInputStream {
-        private val input = FileInputStream(pfd.fileDescriptor)
-        private val channel: FileChannel = input.channel
+    sealed class OpenResult {
+        data class Ok(val renderer: MuPdfPageRenderer) : OpenResult()
+        object NeedsPassword : OpenResult()
+        data class Error(val cause: Throwable? = null) : OpenResult()
+    }
 
-        override fun read(buffer: ByteArray): Int = input.read(buffer)
+    companion object {
 
-        override fun seek(offset: Long, whence: Int): Long {
-            val target = when (whence) {
-                SeekableStream.SEEK_SET -> offset
-                SeekableStream.SEEK_CUR -> channel.position() + offset
-                SeekableStream.SEEK_END -> channel.size() + offset
-                else -> throw IOException("Unknown seek mode: $whence")
-            }.coerceAtLeast(0L)
-            channel.position(target)
-            return target
+        /**
+         * Open the document at [uri], optionally unlocking it with [password].
+         * Runs on [Dispatchers.IO]. The caller must [close] the returned
+         * renderer when done.
+         */
+        suspend fun open(
+            context: Context,
+            uri: Uri,
+            password: String? = null,
+        ): OpenResult = withContext(Dispatchers.IO) {
+            val stream = try {
+                PfdSeekableStream.open(context, uri)
+            } catch (t: Throwable) {
+                return@withContext OpenResult.Error(t)
+            }
+            val doc = try {
+                Document.openDocument(stream, "application/pdf")
+            } catch (t: Throwable) {
+                stream.close()
+                return@withContext OpenResult.Error(t)
+            } ?: run {
+                stream.close()
+                return@withContext OpenResult.Error()
+            }
+            try {
+                if (doc.needsPassword()) {
+                    if (password.isNullOrEmpty()) {
+                        doc.destroy()
+                        stream.close()
+                        return@withContext OpenResult.NeedsPassword
+                    }
+                    if (!doc.authenticatePassword(password)) {
+                        doc.destroy()
+                        stream.close()
+                        return@withContext OpenResult.NeedsPassword
+                    }
+                }
+                val pageCount = doc.countPages()
+                if (pageCount <= 0) {
+                    doc.destroy()
+                    stream.close()
+                    return@withContext OpenResult.Error()
+                }
+                OpenResult.Ok(MuPdfPageRenderer(stream, doc, pageCount))
+            } catch (t: Throwable) {
+                runCatching { doc.destroy() }
+                runCatching { stream.close() }
+                OpenResult.Error(t)
+            }
         }
 
-        override fun position(): Long = channel.position()
-
-        fun close() {
-            channel.close()
-            input.close()
+        private fun isExternalUri(uri: String): Boolean {
+            if (uri.isBlank()) return false
+            val lower = uri.lowercase()
+            return lower.startsWith("http://") ||
+                lower.startsWith("https://") ||
+                lower.startsWith("mailto:") ||
+                lower.startsWith("tel:") ||
+                lower.startsWith("ftp://")
         }
     }
 }

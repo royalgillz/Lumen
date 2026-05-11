@@ -1,7 +1,6 @@
 package com.lumen.app.ui.common
 
 import android.graphics.Bitmap
-import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -15,14 +14,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.artifex.mupdf.fitz.ColorSpace
+import com.artifex.mupdf.fitz.Matrix
+import com.lumen.app.data.pdf.withMuPdfDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 
 @Composable
 fun PdfThumbnail(
@@ -34,21 +36,43 @@ fun PdfThumbnail(
     val bitmapState = produceState<Bitmap?>(initialValue = null, uriString, pageIndex) {
         val parsed = runCatching { Uri.parse(uriString) }.getOrNull()
         value = if (parsed == null) null else withContext(Dispatchers.IO) {
-            try {
-                context.contentResolver.openFileDescriptor(parsed, "r")?.use { pfd ->
-                    PdfRenderer(pfd).use { renderer ->
-                        if (renderer.pageCount <= 0) return@withContext null
-                        renderer.openPage(pageIndex.coerceIn(0, renderer.pageCount - 1)).use { page ->
-                            val width = 96
-                            val height = ((width.toFloat() / page.width) * page.height).toInt().coerceAtLeast(120)
-                            val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                            bmp
+            withMuPdfDocument(context, parsed) { doc ->
+                val count = doc.countPages()
+                if (count <= 0) return@withMuPdfDocument null
+                val safeIndex = pageIndex.coerceIn(0, count - 1)
+                val page = runCatching { doc.loadPage(safeIndex) }.getOrNull()
+                    ?: return@withMuPdfDocument null
+                try {
+                    val bounds = page.bounds
+                    val pageWidthPts = bounds.x1 - bounds.x0
+                    val pageHeightPts = bounds.y1 - bounds.y0
+                    if (pageWidthPts <= 0f || pageHeightPts <= 0f) return@withMuPdfDocument null
+                    val targetPx = 96f
+                    val scale = (targetPx / pageWidthPts).coerceAtLeast(0.01f)
+                    val matrix = Matrix(scale, scale)
+                    val pixmap = runCatching {
+                        page.toPixmap(matrix, ColorSpace.DeviceRGB, true)
+                    }.getOrNull() ?: return@withMuPdfDocument null
+                    try {
+                        val w = pixmap.width
+                        val h = pixmap.height
+                        if (w <= 0 || h <= 0) return@withMuPdfDocument null
+                        val samples = pixmap.samples ?: return@withMuPdfDocument null
+                        val expected = w * h * 4
+                        if (samples.size < expected) return@withMuPdfDocument null
+                        val bmp = try {
+                            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        } catch (_: OutOfMemoryError) {
+                            return@withMuPdfDocument null
                         }
+                        bmp.copyPixelsFromBuffer(ByteBuffer.wrap(samples, 0, expected))
+                        bmp
+                    } finally {
+                        runCatching { pixmap.destroy() }
                     }
+                } finally {
+                    runCatching { page.destroy() }
                 }
-            } catch (_: Exception) {
-                null
             }
         }
     }

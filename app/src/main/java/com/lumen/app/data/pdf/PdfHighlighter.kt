@@ -1,16 +1,18 @@
 package com.lumen.app.data.pdf
 
+import android.content.Context
 import android.graphics.RectF
-import com.tom_roush.pdfbox.io.MemoryUsageSetting
-import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.text.PDFTextStripper
-import com.tom_roush.pdfbox.text.TextPosition
-import java.io.InputStream
+import android.net.Uri
+import com.artifex.mupdf.fitz.Quad
+import com.artifex.mupdf.fitz.StructuredText
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class PdfHighlighter @Inject constructor() {
+class PdfHighlighter @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
 
     data class PageHighlights(
         val rects: List<RectF>,
@@ -19,96 +21,153 @@ class PdfHighlighter @Inject constructor() {
     )
 
     /**
-     * Computes highlight rectangles for [pageIndex] only (stripper is scoped to that page).
-     * Uses mixed RAM + scratch file so large PDFs are less likely to OOM than [PDDocument.load] defaults.
+     * Compute highlight rectangles for [keyword] on [pageIndex] of the PDF at [uri].
+     * Uses MuPDF's structured-text extractor; rects are in page-point coordinates
+     * and already account for the page's rotation (MuPDF reports bboxes in the
+     * page's rendered coordinate space).
      */
-    fun findOnPage(stream: InputStream, pageIndex: Int, keyword: String, password: String? = null): PageHighlights {
-        if (keyword.isBlank()) return PageHighlights(emptyList(), 0f, 0f)
-        val mem = MemoryUsageSetting.setupMixed(8L * 1024 * 1024)
-        return try {
-            PDDocument.load(stream, password ?: "", mem).use { doc ->
-                if (pageIndex >= doc.numberOfPages) return PageHighlights(emptyList(), 0f, 0f)
-                val page = doc.getPage(pageIndex)
-
-                // cropBox defines the visible/rendered area; fall back to mediaBox
-                val box = page.cropBox ?: page.mediaBox
-                val rotation = page.rotation % 360
-
-                // PDFView renders pages accounting for rotation: swap dims for 90°/270°
-                val pageWidthPts = if (rotation == 90 || rotation == 270) box.height else box.width
-                val pageHeightPts = if (rotation == 90 || rotation == 270) box.width else box.height
-
-                val stripper = KeywordStripper(
-                    keyword = keyword.trim().lowercase(),
-                    cropOffsetX = box.lowerLeftX,
-                )
-                stripper.startPage = pageIndex + 1
-                stripper.endPage = pageIndex + 1
-                stripper.sortByPosition = true
-                try { stripper.getText(doc) } catch (_: Exception) {}
-                stripper.buildHighlights(pageHeightPts)
-
-                PageHighlights(stripper.highlights, pageWidthPts, pageHeightPts)
+    fun findOnPage(
+        uri: Uri,
+        pageIndex: Int,
+        keyword: String,
+        password: String? = null,
+    ): PageHighlights {
+        if (keyword.isBlank()) return EMPTY
+        return withMuPdfDocument(context, uri, password) { doc ->
+            if (pageIndex !in 0 until doc.countPages()) return@withMuPdfDocument EMPTY
+            val page = runCatching { doc.loadPage(pageIndex) }.getOrNull()
+                ?: return@withMuPdfDocument EMPTY
+            try {
+                val bounds = page.bounds
+                val pageWidthPts = bounds.x1 - bounds.x0
+                val pageHeightPts = bounds.y1 - bounds.y0
+                val stext = runCatching { page.toStructuredText("preserve-whitespace") }.getOrNull()
+                    ?: return@withMuPdfDocument PageHighlights(emptyList(), pageWidthPts, pageHeightPts)
+                try {
+                    val rects = extractKeywordRects(stext, keyword, bounds.x0, bounds.y0)
+                    PageHighlights(rects, pageWidthPts, pageHeightPts)
+                } finally {
+                    runCatching { stext.destroy() }
+                }
+            } catch (_: OutOfMemoryError) {
+                EMPTY
+            } catch (_: Throwable) {
+                EMPTY
+            } finally {
+                runCatching { page.destroy() }
             }
-        } catch (_: OutOfMemoryError) {
-            PageHighlights(emptyList(), 0f, 0f)
-        } catch (_: Exception) {
-            PageHighlights(emptyList(), 0f, 0f)
+        } ?: EMPTY
+    }
+
+    /**
+     * Walks the structured-text tree once, building a parallel buffer of
+     * lowercase code points and per-code-unit [Quad] references so a substring
+     * match in the buffer can be mapped back to the union of its source char
+     * quads.
+     *
+     * Handles ligature glyphs (fi, fl, ffi…) and supplementary characters
+     * (surrogate pairs) by recording one quad per UTF-16 code unit produced.
+     */
+    private fun extractKeywordRects(
+        stext: StructuredText,
+        keyword: String,
+        offsetX: Float,
+        offsetY: Float,
+    ): List<RectF> {
+        val needle = buildLowercaseString(keyword)
+        if (needle.isEmpty()) return emptyList()
+
+        val buffer = StringBuilder()
+        val quads = ArrayList<Quad>(256)
+
+        val blocks = runCatching { stext.blocks }.getOrNull() ?: return emptyList()
+        for (block in blocks) {
+            if (block == null) continue
+            val lines = runCatching { block.lines }.getOrNull() ?: continue
+            for (line in lines) {
+                if (line == null) continue
+                val chars = runCatching { line.chars }.getOrNull() ?: continue
+                for (ch in chars) {
+                    if (ch == null) continue
+                    val cp = ch.c
+                    val quad = ch.quad ?: continue
+                    val lower = Character.toLowerCase(cp)
+                    buffer.appendCodePoint(lower)
+                    repeat(Character.charCount(lower)) { quads.add(quad) }
+                }
+                // Insert a synthetic space between lines so cross-line matches
+                // don't glue end-of-line words together. Quads list grows in
+                // parallel so the index alignment is preserved.
+                buffer.append(' ')
+                quads.add(SENTINEL_QUAD)
+            }
         }
-    }
-}
 
-private class KeywordStripper(
-    private val keyword: String,
-    private val cropOffsetX: Float = 0f,
-) : PDFTextStripper() {
+        val haystack = buffer.toString()
+        if (haystack.length < needle.length) return emptyList()
 
-    private val collected = mutableListOf<TextPosition>()
-    val highlights = mutableListOf<RectF>()
-
-    override fun writeString(text: String, textPositions: List<TextPosition>) {
-        super.writeString(text, textPositions)
-        collected.addAll(textPositions)
-    }
-
-    fun buildHighlights(pageHeightPts: Float) {
-        if (collected.isEmpty() || keyword.isEmpty()) return
-
-        // Build a char→TextPosition-index map so ligature glyphs (fi, fl, ffi…) are handled
-        // correctly. A single TextPosition can carry a 2-char unicode string, so character
-        // indices in the assembled string don't map 1-to-1 with TextPosition indices.
-        val charToPos = ArrayList<Int>(collected.size + 16)
-        val fullText = buildString {
-            collected.forEachIndexed { posIdx, tp ->
-                val chars = tp.unicode ?: " "
-                repeat(chars.length) { charToPos.add(posIdx) }
-                append(chars)
-            }
-        }.lowercase()
-
+        val rects = ArrayList<RectF>()
         var searchFrom = 0
         while (true) {
-            val idx = fullText.indexOf(keyword, searchFrom)
+            val idx = haystack.indexOf(needle, searchFrom)
             if (idx < 0) break
-
-            val charEnd = idx + keyword.length - 1
-            if (charEnd >= charToPos.size) break
-
-            val posStart = charToPos[idx]
-            val posEnd = (charToPos[charEnd] + 1).coerceAtMost(collected.size)
-            val slice = collected.subList(posStart, posEnd)
-
-            if (slice.isNotEmpty()) {
-                // Use direction-adjusted metrics from PDFBox so rotation/layout is normalized.
-                // getYDirAdj is already in display space (top-origin), so we do not flip Y again.
-                val left = slice.minOf { it.xDirAdj } - cropOffsetX
-                val right = slice.maxOf { it.xDirAdj + it.widthDirAdj } - cropOffsetX
-                val screenTop = (slice.minOf { it.yDirAdj - it.heightDir } - 1f).coerceAtLeast(0f)
-                val screenBottom = (slice.maxOf { it.yDirAdj } + 1f).coerceAtMost(pageHeightPts)
-                highlights.add(RectF(left - 1f, screenTop, right + 1f, screenBottom))
+            val end = idx + needle.length - 1
+            if (end < quads.size) {
+                rects.add(unionRect(quads, idx, end, offsetX, offsetY))
             }
-
-            searchFrom = (idx + keyword.length).coerceAtLeast(idx + 1)
+            searchFrom = idx + needle.length
         }
+        return rects
+    }
+
+    private fun unionRect(
+        quads: List<Quad>,
+        start: Int,
+        endInclusive: Int,
+        offsetX: Float,
+        offsetY: Float,
+    ): RectF {
+        var minX = Float.POSITIVE_INFINITY
+        var minY = Float.POSITIVE_INFINITY
+        var maxX = Float.NEGATIVE_INFINITY
+        var maxY = Float.NEGATIVE_INFINITY
+        for (i in start..endInclusive) {
+            val q = quads[i]
+            if (q === SENTINEL_QUAD) continue
+            val xs = floatArrayOf(q.ul_x, q.ur_x, q.ll_x, q.lr_x)
+            val ys = floatArrayOf(q.ul_y, q.ur_y, q.ll_y, q.lr_y)
+            for (x in xs) { if (x < minX) minX = x; if (x > maxX) maxX = x }
+            for (y in ys) { if (y < minY) minY = y; if (y > maxY) maxY = y }
+        }
+        // 1pt padding on the horizontal axis mirrors the pre-MuPDF rect inflation
+        // so the amber highlight visibly overhangs the glyph edges.
+        return RectF(
+            minX - 1f - offsetX,
+            minY - offsetY,
+            maxX + 1f - offsetX,
+            maxY - offsetY,
+        )
+    }
+
+    private fun buildLowercaseString(s: String): String {
+        val sb = StringBuilder(s.length)
+        val trimmed = s.trim()
+        var i = 0
+        while (i < trimmed.length) {
+            val cp = trimmed.codePointAt(i)
+            sb.appendCodePoint(Character.toLowerCase(cp))
+            i += Character.charCount(cp)
+        }
+        return sb.toString()
+    }
+
+    private companion object {
+        val EMPTY = PageHighlights(emptyList(), 0f, 0f)
+
+        // Marker Quad inserted between lines so index alignment is preserved
+        // without contributing to keyword-spanning rect unions.
+        val SENTINEL_QUAD = Quad(
+            0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f,
+        )
     }
 }
