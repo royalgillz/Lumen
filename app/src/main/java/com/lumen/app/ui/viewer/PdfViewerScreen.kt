@@ -41,14 +41,18 @@ import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pin
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -129,6 +133,7 @@ fun PdfViewerScreen(
     var isViewerSearchActive by remember { mutableStateOf(false) }
     var viewerSearchText by remember { mutableStateOf("") }
     var showBrightnessSlider by remember { mutableStateOf(false) }
+    var showOverflowMenu by remember { mutableStateOf(false) }
     var brightness by remember { mutableFloatStateOf(0.5f) }
     var showControls by remember { mutableStateOf(true) }
     var controlsTouchTick by remember { mutableIntStateOf(0) }
@@ -197,8 +202,8 @@ fun PdfViewerScreen(
 
     // Auto-hide controls after 4.2s — but never while an error or password
     // prompt is shown, since the toolbar is the only way out.
-    LaunchedEffect(showControls, controlsTouchTick, isFailed, isLocked) {
-        if (showControls && !isViewerSearchActive && !isFailed && !isLocked) {
+    LaunchedEffect(showControls, controlsTouchTick, isFailed, isLocked, showOverflowMenu) {
+        if (showControls && !isViewerSearchActive && !isFailed && !isLocked && !showOverflowMenu) {
             delay(4200)
             showControls = false
             showBrightnessSlider = false
@@ -560,24 +565,68 @@ fun PdfViewerScreen(
                                 tint = if (isViewerSearchActive) AmberAccent else MaterialTheme.colorScheme.onSurface,
                             )
                         }
-                        IconButton(onClick = { showPageJump = true; controlsTouchTick++ }) {
-                            Icon(Icons.Default.Pin, contentDescription = "Go to page")
-                        }
-                        IconButton(onClick = {
-                            showBrightnessSlider = !showBrightnessSlider
-                            controlsTouchTick++
-                        }) {
-                            Icon(
-                                Icons.Default.BrightnessMedium,
-                                contentDescription = "Brightness",
-                                tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
-                        IconButton(onClick = { viewModel.toggleScrollMode(); controlsTouchTick++ }) {
-                            Icon(
-                                imageVector = if (scrollHorizontal) Icons.Default.SwapVert else Icons.Default.SwapHoriz,
-                                contentDescription = null,
-                            )
+                        Box {
+                            IconButton(onClick = {
+                                showOverflowMenu = true
+                                controlsTouchTick++
+                            }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                            }
+                            DropdownMenu(
+                                expanded = showOverflowMenu,
+                                onDismissRequest = { showOverflowMenu = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Share") },
+                                    leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        controlsTouchTick++
+                                        sharePdf(context, uri, filename) {
+                                            showControls = true
+                                            controlsTouchTick++
+                                        }
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Go to page") },
+                                    leadingIcon = { Icon(Icons.Default.Pin, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showPageJump = true
+                                        controlsTouchTick++
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Brightness") },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.BrightnessMedium,
+                                            contentDescription = null,
+                                            tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showBrightnessSlider = !showBrightnessSlider
+                                        controlsTouchTick++
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (scrollHorizontal) "Vertical scroll" else "Horizontal scroll") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (scrollHorizontal) Icons.Default.SwapVert else Icons.Default.SwapHoriz,
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        viewModel.toggleScrollMode()
+                                        controlsTouchTick++
+                                    },
+                                )
+                            }
                         }
                     }
                     AnimatedVisibility(
@@ -731,6 +780,37 @@ private fun handleExternalLink(
         context.startActivity(
             Intent(Intent.ACTION_VIEW, Uri.parse(normalized)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            },
+        )
+    } catch (_: ActivityNotFoundException) {
+        onError()
+    } catch (_: SecurityException) {
+        onError()
+    }
+}
+
+private fun sharePdf(
+    context: android.content.Context,
+    rawUri: String,
+    filename: String,
+    onError: () -> Unit,
+) {
+    val uri = runCatching { Uri.parse(rawUri) }.getOrNull()
+    if (uri == null) {
+        onError()
+        return
+    }
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "application/pdf"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_TITLE, filename)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    try {
+        context.startActivity(
+            Intent.createChooser(send, "Share PDF").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             },
         )
     } catch (_: ActivityNotFoundException) {
