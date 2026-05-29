@@ -78,7 +78,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -106,6 +105,7 @@ fun PdfViewerScreen(
     pageNumber: Int,
     filename: String,
     keyword: String = "",
+    occurrence: Int = 0,
     onBack: () -> Unit,
     viewModel: PdfViewerViewModel = hiltViewModel(),
 ) {
@@ -117,10 +117,12 @@ fun PdfViewerScreen(
 
     val documentState by viewModel.documentState.collectAsState()
     val scrollHorizontal by viewModel.scrollHorizontal.collectAsState()
-    val highlights by viewModel.highlights.collectAsState()
     val highlightSkipped by viewModel.highlightSkipped.collectAsState()
-    val matchPages by viewModel.viewerMatchPages.collectAsState()
-    val matchIndex by viewModel.viewerMatchIndex.collectAsState()
+    val occurrences by viewModel.occurrences.collectAsState()
+    val activeOccurrence by viewModel.activeOccurrence.collectAsState()
+    val activePage by viewModel.activePage.collectAsState()
+    val activeRectIndexOnPage by viewModel.activeRectIndexOnPage.collectAsState()
+    val pageHighlights by viewModel.pageHighlights.collectAsState()
 
     // ── Viewer-only Compose state ─────────────────────────────────────────────
     val displayPage = remember { mutableIntStateOf(pageNumber) }
@@ -130,8 +132,12 @@ fun PdfViewerScreen(
     var showPasswordPrompt by remember { mutableStateOf(false) }
     var passwordInput by remember { mutableStateOf("") }
     var activePdfPassword by remember { mutableStateOf<String?>(null) }
-    var isViewerSearchActive by remember { mutableStateOf(false) }
-    var viewerSearchText by remember { mutableStateOf("") }
+    // When opened from global search, pre-fill the in-document search bar with the
+    // keyword so the reader can immediately step between occurrences.
+    var isViewerSearchActive by remember { mutableStateOf(keyword.isNotBlank()) }
+    var viewerSearchText by remember { mutableStateOf(keyword) }
+    // Pass the tapped occurrence to the first search only.
+    var initialSearchDone by remember { mutableStateOf(false) }
     var showBrightnessSlider by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var brightness by remember { mutableFloatStateOf(0.5f) }
@@ -141,10 +147,11 @@ fun PdfViewerScreen(
     val pdfDocView = remember { mutableStateOf<PdfDocumentView?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    val activeHighlightQuery = if (isViewerSearchActive) viewerSearchText.trim() else keyword.trim()
-    val latestHighlightQuery by rememberUpdatedState(activeHighlightQuery)
-    val latestPdfPassword by rememberUpdatedState(activePdfPassword)
+    // The query whose occurrences drive the overlay: the in-document search text
+    // when the search bar is open, otherwise the keyword the viewer was opened with.
+    val effectiveQuery = (if (isViewerSearchActive) viewerSearchText else keyword).trim()
     val viewerSearchQuery = viewerSearchText.trim()
+    val isLoaded = documentState is PdfViewerViewModel.DocumentState.Loaded
     val viewerChromeColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.96f)
     val statusBarScrimColor = MaterialTheme.colorScheme.surfaceVariant
     val statusBarColor = statusBarScrimColor.toArgb()
@@ -234,26 +241,45 @@ fun PdfViewerScreen(
             if (result == SnackbarResult.ActionPerformed) {
                 pdfDocView.value?.jumpToPage(lastPage, animate = true)
                 displayPage.intValue = lastPage
-                if (activeHighlightQuery.isNotBlank()) {
-                    viewModel.loadHighlights(uri, lastPage, activeHighlightQuery, activePdfPassword)
-                }
             }
         }
     }
 
-    // Initial keyword highlight load
-    LaunchedEffect(uri, pageNumber, activeHighlightQuery, activePdfPassword,
-        documentState is PdfViewerViewModel.DocumentState.Loaded) {
-        if (documentState !is PdfViewerViewModel.DocumentState.Loaded) return@LaunchedEffect
-        viewModel.loadHighlights(uri, pageNumber, activeHighlightQuery, activePdfPassword)
+    // Debounced occurrence enumeration. The first run (the keyword the viewer was
+    // opened with) carries the tapped page + occurrence so it opens on the exact
+    // match; later runs (typing in the search bar) start at the first match.
+    LaunchedEffect(effectiveQuery, activePdfPassword, isLoaded) {
+        if (!isLoaded) return@LaunchedEffect
+        delay(180)
+        if (effectiveQuery.length < 2) {
+            viewModel.clearSearch()
+            return@LaunchedEffect
+        }
+        if (!initialSearchDone && keyword.isNotBlank() && effectiveQuery == keyword.trim()) {
+            initialSearchDone = true
+            viewModel.runInDocumentSearch(uri, effectiveQuery, activePdfPassword, pageNumber, occurrence)
+        } else {
+            viewModel.runInDocumentSearch(uri, effectiveQuery, activePdfPassword)
+        }
     }
 
-    // Sync highlights → view
-    LaunchedEffect(highlights, displayPage.intValue) {
-        val h = highlights
+    // Bring the active occurrence's page into view. Keyed on page only, so stepping
+    // between occurrences on the same page doesn't re-snap to the page top — the
+    // highlight overlay below handles centering the active rect.
+    LaunchedEffect(activePage) {
+        if (activePage >= 0) pdfDocView.value?.jumpToPage(activePage, animate = true)
+    }
+
+    // Draw the highlights for whichever page is currently shown, emphasising the
+    // active occurrence only when its page is the one on screen. Because each
+    // PageHighlights carries its own page index, rects can never be drawn on the
+    // wrong page.
+    LaunchedEffect(displayPage.intValue, pageHighlights, activePage, activeRectIndexOnPage) {
         val v = pdfDocView.value ?: return@LaunchedEffect
-        if (h != null && h.rects.isNotEmpty() && h.pageWidthPts > 0f) {
-            v.setHighlight(displayPage.intValue, h.rects, h.pageWidthPts, h.pageHeightPts)
+        val ph = pageHighlights[displayPage.intValue]
+        if (ph != null && ph.rects.isNotEmpty() && ph.pageWidthPts > 0f) {
+            val activeIdx = if (displayPage.intValue == activePage) activeRectIndexOnPage else -1
+            v.setHighlight(ph.pageIndex, ph.rects, ph.pageWidthPts, ph.pageHeightPts, activeIdx)
         } else {
             v.clearHighlight()
         }
@@ -268,28 +294,6 @@ fun PdfViewerScreen(
             )
             viewModel.resetHighlightSkipped()
         }
-    }
-
-    // In-viewer match navigation
-    LaunchedEffect(matchIndex, matchPages, activeHighlightQuery, activePdfPassword) {
-        if (matchPages.isNotEmpty()) {
-            val page = matchPages.getOrNull(matchIndex) ?: return@LaunchedEffect
-            pdfDocView.value?.jumpToPage(page, animate = true)
-            viewModel.loadHighlights(uri, page, activeHighlightQuery, activePdfPassword)
-        }
-    }
-
-    // Debounced in-viewer search; one-letter input never queries
-    LaunchedEffect(isViewerSearchActive, viewerSearchQuery, activePdfPassword) {
-        if (!isViewerSearchActive) return@LaunchedEffect
-        delay(180)
-        if (viewerSearchQuery.length < 2) {
-            viewModel.searchInDocument(uri, "")
-            viewModel.clearHighlights()
-            return@LaunchedEffect
-        }
-        viewModel.searchInDocument(uri, viewerSearchQuery)
-        viewModel.loadHighlights(uri, displayPage.intValue, viewerSearchQuery, activePdfPassword)
     }
 
     // Sync scroll mode → view
@@ -359,9 +363,6 @@ fun PdfViewerScreen(
                     val target = pageJumpInput.toIntOrNull()?.minus(1)
                     if (target != null && target in 0 until pageCount.intValue) {
                         pdfDocView.value?.jumpToPage(target, animate = true)
-                        if (activeHighlightQuery.isNotBlank()) {
-                            viewModel.loadHighlights(uri, target, activeHighlightQuery, activePdfPassword)
-                        }
                     }
                     showPageJump = false
                     pageJumpInput = ""
@@ -415,11 +416,6 @@ fun PdfViewerScreen(
                                         displayPage.intValue = currentPage
                                         pageCount.intValue = totalPages
                                         viewModel.saveLastPage(uri, currentPage)
-                                        if (latestHighlightQuery.isNotBlank()) {
-                                            viewModel.loadHighlights(
-                                                uri, currentPage, latestHighlightQuery, latestPdfPassword,
-                                            )
-                                        }
                                     }
                                     override fun onSingleTap() {
                                         showControls = !showControls
@@ -437,11 +433,6 @@ fun PdfViewerScreen(
                                     }
                                     override fun onInternalLinkTap(pageIndex: Int) {
                                         v.jumpToPage(pageIndex, animate = true)
-                                        if (latestHighlightQuery.isNotBlank()) {
-                                            viewModel.loadHighlights(
-                                                uri, pageIndex, latestHighlightQuery, latestPdfPassword,
-                                            )
-                                        }
                                     }
                                     override fun onZoomChanged(zoom: Float) { /* no-op */ }
                                 })
@@ -554,7 +545,6 @@ fun PdfViewerScreen(
                             isViewerSearchActive = !isViewerSearchActive
                             if (!isViewerSearchActive) {
                                 viewerSearchText = ""
-                                viewModel.searchInDocument(uri, "")
                             }
                             showControls = true
                             controlsTouchTick++
@@ -658,17 +648,18 @@ fun PdfViewerScreen(
                                 ),
                                 textStyle = MaterialTheme.typography.bodyMedium,
                             )
-                            if (matchPages.isNotEmpty()) {
+                            if (occurrences.isNotEmpty()) {
                                 Text(
-                                    text = "${matchIndex + 1} / ${matchPages.size}",
+                                    text = "${activeOccurrence + 1} / ${occurrences.size}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 4.dp),
                                 )
+                                val canNavigate = occurrences.size > 1
                                 IconButton(
-                                    onClick = { viewModel.prevMatch() },
-                                    enabled = matchPages.size > 1,
+                                    onClick = { viewModel.prevOccurrence() },
+                                    enabled = canNavigate,
                                     modifier = Modifier.size(36.dp),
                                 ) {
                                     Icon(
@@ -678,8 +669,8 @@ fun PdfViewerScreen(
                                     )
                                 }
                                 IconButton(
-                                    onClick = { viewModel.nextMatch() },
-                                    enabled = matchPages.size > 1,
+                                    onClick = { viewModel.nextOccurrence() },
+                                    enabled = canNavigate,
                                     modifier = Modifier.size(36.dp),
                                 ) {
                                     Icon(
@@ -707,7 +698,6 @@ fun PdfViewerScreen(
                                 onClick = {
                                     isViewerSearchActive = false
                                     viewerSearchText = ""
-                                    viewModel.searchInDocument(uri, "")
                                     controlsTouchTick++
                                 },
                                 modifier = Modifier.size(36.dp),

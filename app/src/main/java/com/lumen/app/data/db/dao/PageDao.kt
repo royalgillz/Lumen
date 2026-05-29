@@ -45,4 +45,19 @@ interface PageDao {
 
     @Query("SELECT COUNT(*) FROM pages WHERE docId = :docId AND isOcr = 1")
     suspend fun getOcrPageCount(docId: Long): Int
+
+    @Query("""
+        SELECT p.pageNumber AS pageNumber, p.wordBoxesJson AS wordBoxesJson
+        FROM pages p
+        JOIN documents d ON p.docId = d.id
+        WHERE d.uri = :docUri AND p.isOcr = 1
+          AND p.wordBoxesJson IS NOT NULL
+          AND p.pageNumber IN (:pages)
+    """)
+    suspend fun ocrWordBoxes(docUri: String, pages: List<Int>): List<OcrPageBoxes>
 }
+
+data class OcrPageBoxes(
+    val pageNumber: Int,
+    val wordBoxesJson: String?,
+)

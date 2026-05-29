@@ -12,4 +12,7 @@ data class SearchResult(
     val isOcr: Boolean,
     val folderName: String,
     val isFilenameMatch: Boolean = false,
+    // 0-based rank of this match among matches on the same page, in reading order.
+    // Lets the viewer open with the correct occurrence highlighted, not the first.
+    val occurrenceOnPage: Int = 0,
 )

@@ -20,7 +20,7 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): LumenDatabase =
         Room.databaseBuilder(context, LumenDatabase::class.java, "lumen.db")
-            .addMigrations(LumenDatabase.MIGRATION_3_4)
+            .addMigrations(LumenDatabase.MIGRATION_3_4, LumenDatabase.MIGRATION_4_5)
             .fallbackToDestructiveMigration(true)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {

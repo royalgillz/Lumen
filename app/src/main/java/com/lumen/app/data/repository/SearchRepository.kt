@@ -29,6 +29,18 @@ class SearchRepository @Inject constructor(
                 (!filters.ocrOnly || row.isOcr)
         }
 
+        // `rows` arrives ordered by (filename, pageNumber, lineNumber), so iterating
+        // here yields each page's matches in reading order — the running counter is
+        // the occurrence's rank on its page.
+        val occurrenceByLineId = HashMap<Long, Int>()
+        val pageMatchCounters = HashMap<Pair<Long, Int>, Int>()
+        for (row in contentFiltered) {
+            val key = row.docId to row.pageNumber
+            val rank = pageMatchCounters.getOrDefault(key, 0)
+            occurrenceByLineId[row.lineId] = rank
+            pageMatchCounters[key] = rank + 1
+        }
+
         // Filename search complements content search. Skip when OCR-only filter is active.
         val filenameRows = if (filters.ocrOnly) {
             emptyList()
@@ -61,6 +73,7 @@ class SearchRepository @Inject constructor(
                     isOcr = row.isOcr,
                     folderName = treeUriToFolderName(row.treeUri),
                     isFilenameMatch = false,
+                    occurrenceOnPage = occurrenceByLineId[row.lineId] ?: 0,
                 )
             })
             addAll(filenameSorted.map { row ->

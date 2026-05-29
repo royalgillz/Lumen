@@ -1,11 +1,14 @@
 package com.lumen.app.ui.viewer
 
 import android.app.Application
+import android.graphics.RectF
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lumen.app.data.db.FtsQuerySanitizer
+import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.fs.SafRepository
+import com.lumen.app.data.ocr.OcrWordBoxes
 import com.lumen.app.data.pdf.PdfHighlighter
 import com.lumen.app.data.repository.SearchRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -25,12 +28,18 @@ class PdfViewerViewModel @Inject constructor(
     private val pdfHighlighter: PdfHighlighter,
     private val searchRepository: SearchRepository,
     private val safRepository: SafRepository,
+    private val pageDao: PageDao,
 ) : AndroidViewModel(application) {
 
     private companion object {
         /** Skip highlight computation for PDFs above this size — they OOM on
          *  mid-range devices even with MuPDF's incremental parser. */
         private const val MAX_HIGHLIGHT_PDF_BYTES = 50L * 1024L * 1024L
+
+        /** Upper bound on match pages scanned per in-document search, to keep a
+         *  query on a huge document from scanning hundreds of pages of structured
+         *  text on every keystroke. */
+        private const val MAX_MATCH_PAGES = 300
     }
 
     // ── Document lifecycle ────────────────────────────────────────────────────
@@ -116,86 +125,171 @@ class PdfViewerViewModel @Inject constructor(
         return if (msg.isNotBlank()) msg else "Unable to open this PDF."
     }
 
-    // ── Keyword highlights ────────────────────────────────────────────────────
+    // ── In-document search (occurrence model) ─────────────────────────────────
+    //
+    // The MuPDF highlighter is the single source of truth: we enumerate every real
+    // occurrence rect across the candidate pages, so the count, the active index,
+    // and the drawn rects can never disagree. Navigation walks a flat list, so it
+    // is synchronous and immune to fast-tap races and to page/text mismatches.
 
-    private val _highlights = MutableStateFlow<PdfHighlighter.PageHighlights?>(null)
-    val highlights: StateFlow<PdfHighlighter.PageHighlights?> = _highlights
+    data class Occurrence(val page: Int, val rectIndex: Int)
+
+    private val _occurrences = MutableStateFlow<List<Occurrence>>(emptyList())
+    val occurrences: StateFlow<List<Occurrence>> = _occurrences.asStateFlow()
+
+    private val _activeOccurrence = MutableStateFlow(0)
+    val activeOccurrence: StateFlow<Int> = _activeOccurrence.asStateFlow()
+
+    /** Page to bring into view for the active occurrence; -1 when none. */
+    private val _activePage = MutableStateFlow(-1)
+    val activePage: StateFlow<Int> = _activePage.asStateFlow()
+
+    /** Rect index of the active occurrence within its page; -1 when none. */
+    private val _activeRectIndexOnPage = MutableStateFlow(-1)
+    val activeRectIndexOnPage: StateFlow<Int> = _activeRectIndexOnPage.asStateFlow()
+
+    /** Per-page highlight rects for drawing, keyed by page index. */
+    private val _pageHighlights = MutableStateFlow<Map<Int, PdfHighlighter.PageHighlights>>(emptyMap())
+    val pageHighlights: StateFlow<Map<Int, PdfHighlighter.PageHighlights>> = _pageHighlights.asStateFlow()
 
     private val _highlightSkipped = MutableStateFlow(false)
-    val highlightSkipped: StateFlow<Boolean> = _highlightSkipped
+    val highlightSkipped: StateFlow<Boolean> = _highlightSkipped.asStateFlow()
 
-    private var highlightJob: Job? = null
+    private var searchJob: Job? = null
 
-    fun loadHighlights(uri: String, pageIndex: Int, keyword: String, pdfPassword: String? = null) {
-        if (keyword.isBlank()) {
-            clearHighlights()
+    fun highlightsForPage(page: Int): PdfHighlighter.PageHighlights? = _pageHighlights.value[page]
+
+    /**
+     * Enumerate every occurrence of [keyword] across the document's match pages and
+     * position the active occurrence. [preferredPage]/[preferredOccurrence] let a
+     * global-search result open directly on the exact match the user tapped.
+     */
+    fun runInDocumentSearch(
+        docUri: String,
+        keyword: String,
+        password: String? = null,
+        preferredPage: Int? = null,
+        preferredOccurrence: Int = 0,
+    ) {
+        searchJob?.cancel()
+        val trimmed = keyword.trim()
+        if (trimmed.length < 2) {
+            resetSearch()
             return
         }
-        val parsedUri = try { Uri.parse(uri) } catch (_: Exception) { return }
+        val parsedUri = runCatching { Uri.parse(docUri) }.getOrNull() ?: run { resetSearch(); return }
         if (!canSafelyComputeHighlights(parsedUri)) {
-            _highlights.value = null
+            resetSearch()
             _highlightSkipped.value = true
             return
         }
         _highlightSkipped.value = false
-        highlightJob?.cancel()
-        highlightJob = viewModelScope.launch(Dispatchers.IO) {
-            _highlights.value = null
-            _highlights.value = try {
-                pdfHighlighter.findOnPage(parsedUri, pageIndex, keyword, pdfPassword)
-            } catch (_: OutOfMemoryError) {
-                null
-            } catch (_: Exception) {
-                null
+        val sanitized = FtsQuerySanitizer.sanitize(trimmed) ?: run { resetSearch(); return }
+        searchJob = viewModelScope.launch(Dispatchers.IO) {
+            val pages = searchRepository.searchPagesInDocument(sanitized, docUri).take(MAX_MATCH_PAGES)
+            // Scanned (OCR) pages have no PDF text layer, so MuPDF finds nothing —
+            // use the word boxes captured at index time. Text-layer pages use MuPDF
+            // (char-precise). Both produce the same PageHighlights shape.
+            val ocrHls = ocrHighlightsForPages(docUri, pages, trimmed)
+            val textPages = pages.filter { it !in ocrHls.keys }
+            val textHls = pdfHighlighter.findOnPages(parsedUri, textPages, trimmed, password)
+                .associateBy { it.pageIndex }
+            val cache = LinkedHashMap<Int, PdfHighlighter.PageHighlights>()
+            val occ = ArrayList<Occurrence>()
+            for (page in pages) {
+                val ph = ocrHls[page] ?: textHls[page]
+                if (ph == null || ph.rects.isEmpty()) continue
+                cache[page] = ph
+                for (r in ph.rects.indices) occ.add(Occurrence(page, r))
             }
+            _pageHighlights.value = cache
+            _occurrences.value = occ
+            val startIdx = when {
+                occ.isEmpty() -> 0
+                preferredPage != null -> {
+                    val first = occ.indexOfFirst { it.page == preferredPage }
+                    if (first < 0) {
+                        0
+                    } else {
+                        val onPage = cache[preferredPage]?.rects?.size ?: 1
+                        first + preferredOccurrence.coerceIn(0, onPage - 1)
+                    }
+                }
+                else -> 0
+            }
+            setActiveOccurrence(startIdx)
         }
     }
 
-    fun clearHighlights() {
-        highlightJob?.cancel()
-        _highlights.value = null
+    /**
+     * Build highlight rects for scanned pages from the OCR word boxes stored at index
+     * time. Boxes are normalised, so we scale them by each page's point size (from the
+     * open renderer) into the same coordinate space the text-layer path uses.
+     */
+    private suspend fun ocrHighlightsForPages(
+        docUri: String,
+        pages: List<Int>,
+        keyword: String,
+    ): Map<Int, PdfHighlighter.PageHighlights> {
+        if (pages.isEmpty()) return emptyMap()
+        val renderer = currentRenderer ?: return emptyMap()
+        val needle = keyword.trim().lowercase()
+        if (needle.isEmpty()) return emptyMap()
+        val rows = runCatching { pageDao.ocrWordBoxes(docUri, pages) }.getOrNull() ?: return emptyMap()
+        val out = LinkedHashMap<Int, PdfHighlighter.PageHighlights>()
+        for (row in rows) {
+            val matched = OcrWordBoxes.decode(row.wordBoxesJson)
+                .filter { it.text.lowercase().contains(needle) }
+            if (matched.isEmpty()) continue
+            val size = renderer.pageSize(row.pageNumber) ?: continue
+            val w = size.width
+            val h = size.height
+            if (w <= 0f || h <= 0f) continue
+            val rects = matched.map { RectF(it.left * w, it.top * h, it.right * w, it.bottom * h) }
+            out[row.pageNumber] = PdfHighlighter.PageHighlights(row.pageNumber, rects, w, h)
+        }
+        return out
     }
+
+    fun nextOccurrence() {
+        val n = _occurrences.value.size
+        if (n == 0) return
+        setActiveOccurrence((_activeOccurrence.value + 1) % n)
+    }
+
+    fun prevOccurrence() {
+        val n = _occurrences.value.size
+        if (n == 0) return
+        setActiveOccurrence((_activeOccurrence.value - 1 + n) % n)
+    }
+
+    fun clearSearch() = resetSearch()
 
     fun resetHighlightSkipped() {
         _highlightSkipped.value = false
     }
 
-    // ── In-document search ────────────────────────────────────────────────────
-
-    private val _viewerMatchPages = MutableStateFlow<List<Int>>(emptyList())
-    val viewerMatchPages: StateFlow<List<Int>> = _viewerMatchPages
-
-    val viewerMatchIndex = MutableStateFlow(0)
-
-    private var inDocSearchJob: Job? = null
-
-    fun searchInDocument(docUri: String, rawQuery: String) {
-        if (rawQuery.isBlank() || rawQuery.trim().length < 2) {
-            _viewerMatchPages.value = emptyList()
-            viewerMatchIndex.value = 0
+    private fun setActiveOccurrence(index: Int) {
+        val occ = _occurrences.value
+        if (occ.isEmpty()) {
+            _activeOccurrence.value = 0
+            _activePage.value = -1
+            _activeRectIndexOnPage.value = -1
             return
         }
-        val sanitized = FtsQuerySanitizer.sanitize(rawQuery.trim()) ?: run {
-            _viewerMatchPages.value = emptyList()
-            return
-        }
-        inDocSearchJob?.cancel()
-        inDocSearchJob = viewModelScope.launch(Dispatchers.IO) {
-            _viewerMatchPages.value = searchRepository.searchPagesInDocument(sanitized, docUri)
-            viewerMatchIndex.value = 0
-        }
+        val i = index.coerceIn(0, occ.size - 1)
+        _activeOccurrence.value = i
+        _activePage.value = occ[i].page
+        _activeRectIndexOnPage.value = occ[i].rectIndex
     }
 
-    fun nextMatch() {
-        val pages = _viewerMatchPages.value
-        if (pages.isEmpty()) return
-        viewerMatchIndex.value = (viewerMatchIndex.value + 1) % pages.size
-    }
-
-    fun prevMatch() {
-        val pages = _viewerMatchPages.value
-        if (pages.isEmpty()) return
-        viewerMatchIndex.value = (viewerMatchIndex.value - 1 + pages.size) % pages.size
+    private fun resetSearch() {
+        searchJob?.cancel()
+        _occurrences.value = emptyList()
+        _pageHighlights.value = emptyMap()
+        _activeOccurrence.value = 0
+        _activePage.value = -1
+        _activeRectIndexOnPage.value = -1
     }
 
     // ── Scroll mode ───────────────────────────────────────────────────────────

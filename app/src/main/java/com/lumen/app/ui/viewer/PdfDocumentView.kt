@@ -28,6 +28,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
  * Custom Android View that draws an entire PDF onto a single Canvas through a
@@ -69,6 +70,9 @@ class PdfDocumentView @JvmOverloads constructor(
     private var scrollHorizontal = false
     private var pendingInitialPage = 0
     private var pageCount = 0
+    /** True once the matrix has been positioned for the current document, so resizes
+     *  preserve the user's zoom/scroll instead of snapping back to the initial page. */
+    private var hasPositioned = false
 
     /** Per-(page, scaleBucket) bitmap cache. Sized in bytes. */
     private val bitmapCache: LruCache<CacheKey, Bitmap> =
@@ -92,6 +96,8 @@ class PdfDocumentView @JvmOverloads constructor(
     private var highlightRects: List<RectF> = emptyList()
     private var highlightPageWidthPts: Float = 0f
     private var highlightPageHeightPts: Float = 0f
+    /** Index into [highlightRects] of the actively-focused occurrence, or -1. */
+    private var highlightActiveIndex: Int = -1
 
     private val bgPaint = Paint().apply { color = 0xFF_141414.toInt() }
     private val pagePaint = Paint().apply { color = Color.WHITE; isAntiAlias = false }
@@ -102,6 +108,16 @@ class PdfDocumentView @JvmOverloads constructor(
     private val highlightPaint = Paint().apply {
         color = Color.argb(89, 0xD4, 0xA2, 0x4C)
         style = Paint.Style.FILL
+    }
+    private val highlightActivePaint = Paint().apply {
+        color = Color.argb(150, 0xD4, 0xA2, 0x4C)
+        style = Paint.Style.FILL
+    }
+    private val highlightActiveStroke = Paint().apply {
+        color = Color.argb(255, 0xB5, 0x7E, 0x1F)
+        style = Paint.Style.STROKE
+        strokeWidth = context.resources.displayMetrics.density * 1.5f
+        isAntiAlias = true
     }
     private val bitmapPaint = Paint().apply { isFilterBitmap = true; isAntiAlias = false }
 
@@ -139,6 +155,7 @@ class PdfDocumentView @JvmOverloads constructor(
         animator?.cancel()
         animator = null
         matrix.reset()
+        hasPositioned = false
 
         this.renderer = renderer
         pendingInitialPage = initialPage
@@ -162,8 +179,10 @@ class PdfDocumentView @JvmOverloads constructor(
         if (scrollHorizontal == horizontal) return
         scrollHorizontal = horizontal
         if (pageSizes.isNotEmpty() && width > 0 && height > 0) {
+            val zoom = currentZoom().coerceIn(ZOOM_MIN, ZOOM_MAX)
             val anchorPage = currentPageIndex()
             relayoutPages()
+            setMatrix(zoom, 0f, 0f)
             jumpToPage(anchorPage, animate = false)
         }
         invalidate()
@@ -174,11 +193,14 @@ class PdfDocumentView @JvmOverloads constructor(
         rects: List<RectF>,
         pageWidthPts: Float,
         pageHeightPts: Float,
+        activeIndex: Int = -1,
     ) {
         highlightPageIndex = pageIndex
         highlightRects = rects
         highlightPageWidthPts = pageWidthPts
         highlightPageHeightPts = pageHeightPts
+        highlightActiveIndex = if (rects.isEmpty()) -1 else activeIndex.coerceIn(-1, rects.size - 1)
+        ensureActiveHighlightVisible()
         invalidate()
     }
 
@@ -186,7 +208,41 @@ class PdfDocumentView @JvmOverloads constructor(
         if (highlightPageIndex < 0 && highlightRects.isEmpty()) return
         highlightPageIndex = -1
         highlightRects = emptyList()
+        highlightActiveIndex = -1
         invalidate()
+    }
+
+    /**
+     * Pan (never zoom) so the active occurrence is brought into the viewport when
+     * it is currently off-screen — mirrors the browser Ctrl+F "scroll to current
+     * match" behaviour. Stays on the same page, so it never re-triggers a page
+     * change / highlight reload.
+     */
+    private fun ensureActiveHighlightVisible() {
+        val idx = highlightActiveIndex
+        if (idx < 0 || idx >= highlightRects.size) return
+        if (highlightPageIndex !in 0 until pageCount) return
+        if (pageSizes.isEmpty() || width == 0 || height == 0) return
+        val pageSize = pageSizes.getOrNull(highlightPageIndex) ?: return
+        val docRect = docRectForPage(highlightPageIndex, pageSize)
+        val sx = if (highlightPageWidthPts > 0f) pageSize.width / highlightPageWidthPts else 1f
+        val sy = if (highlightPageHeightPts > 0f) pageSize.height / highlightPageHeightPts else 1f
+        val r = highlightRects[idx]
+        tmpRect.set(
+            docRect.left + r.left * sx,
+            docRect.top + r.top * sy,
+            docRect.left + r.right * sx,
+            docRect.top + r.bottom * sy,
+        )
+        matrix.mapRect(tmpRect)
+        val fullyVisible = tmpRect.top >= 0f && tmpRect.bottom <= height &&
+            tmpRect.left >= 0f && tmpRect.right <= width
+        if (fullyVisible) return
+        animator?.cancel()
+        val dx = width / 2f - tmpRect.centerX()
+        val dy = height / 2f - tmpRect.centerY()
+        matrix.postTranslate(dx, dy)
+        clampMatrix()
     }
 
     fun jumpToPage(index: Int, animate: Boolean = true) {
@@ -261,10 +317,23 @@ class PdfDocumentView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (w > 0 && h > 0 && pageSizes.isNotEmpty()) {
-            val anchorPage = currentPageIndex().coerceAtLeast(0)
+        if (w <= 0 || h <= 0 || pageSizes.isEmpty()) return
+        if (!hasPositioned) {
+            // First real layout: open at the requested page, zoom 1.
             relayoutPages()
-            jumpToPage(anchorPage, animate = false)
+            setMatrix(zoom = 1f, tx = 0f, ty = 0f)
+            clampMatrix()
+            jumpToPage(pendingInitialPage, animate = false)
+            hasPositioned = true
+        } else {
+            // Later resizes (e.g. the toolbar auto-hiding) must NOT reset the user's
+            // zoom — preserve the zoom and keep the same doc point centred.
+            val zoom = currentZoom().coerceIn(ZOOM_MIN, ZOOM_MAX)
+            val center = viewportCenterDoc()
+            relayoutPages()
+            restoreView(zoom, center[0], center[1])
+            invalidate()
+            maybeEmitPageChange()
         }
     }
 
@@ -324,10 +393,13 @@ class PdfDocumentView @JvmOverloads constructor(
                 }
                 drawHighlightsForPage(canvas, i, docRect)
             } else {
-                // Prefetch this page's bitmap so a small scroll doesn't show blank.
-                val key = CacheKey(i, scaleBucket)
+                // Prefetch only a cheap base (bucket 0) bitmap for off-screen
+                // neighbours. Prefetching at the current high zoom bucket would push
+                // the working set past the cache, evicting the visible page's bitmap
+                // and causing render→evict→repeat flicker.
+                val key = CacheKey(i, 0)
                 if (bitmapCache.get(key) == null) {
-                    schedulePageRender(i, scaleBucket, zoom)
+                    schedulePageRender(i, 0, 1f)
                 }
             }
         }
@@ -354,7 +426,7 @@ class PdfDocumentView @JvmOverloads constructor(
         // PDF reports cropbox != mediabox. Scale to the renderer's bounds.
         val sx = if (highlightPageWidthPts > 0f) pageW / highlightPageWidthPts else 1f
         val sy = if (highlightPageHeightPts > 0f) pageH / highlightPageHeightPts else 1f
-        for (rect in highlightRects) {
+        for ((i, rect) in highlightRects.withIndex()) {
             tmpRect.set(
                 docPageRect.left + rect.left * sx,
                 docPageRect.top + rect.top * sy,
@@ -362,7 +434,12 @@ class PdfDocumentView @JvmOverloads constructor(
                 docPageRect.top + rect.bottom * sy,
             )
             matrix.mapRect(tmpRect)
-            canvas.drawRect(tmpRect, highlightPaint)
+            if (i == highlightActiveIndex) {
+                canvas.drawRect(tmpRect, highlightActivePaint)
+                canvas.drawRect(tmpRect, highlightActiveStroke)
+            } else {
+                canvas.drawRect(tmpRect, highlightPaint)
+            }
         }
     }
 
@@ -376,10 +453,13 @@ class PdfDocumentView @JvmOverloads constructor(
         }
         pageSizes = sizes
         relayoutPages()
-        // The view may not have been laid out yet — jumpToPage will be a no-op then,
-        // and onSizeChanged will retry once we have a real width/height.
-        if (width > 0 && height > 0) {
+        // The view may not have been laid out yet — onSizeChanged will position once
+        // we have a real width/height.
+        if (width > 0 && height > 0 && !hasPositioned) {
+            setMatrix(zoom = 1f, tx = 0f, ty = 0f)
+            clampMatrix()
             jumpToPage(pendingInitialPage, animate = false)
+            hasPositioned = true
         }
         invalidate()
     }
@@ -424,8 +504,26 @@ class PdfDocumentView @JvmOverloads constructor(
             width.toFloat() / maxWidthPts
         }
         if (fitScale <= 0f || !fitScale.isFinite()) fitScale = 1f
+        // Layout only — callers position the matrix so zoom/scroll can be preserved
+        // across resizes.
+    }
 
-        setMatrix(zoom = 1f, tx = 0f, ty = 0f)
+    /** The doc-space point currently at the centre of the viewport. */
+    private fun viewportCenterDoc(): FloatArray {
+        matrix.getValues(matrixValues)
+        val sx = matrixValues[Matrix.MSCALE_X]
+        val tx = matrixValues[Matrix.MTRANS_X]
+        val ty = matrixValues[Matrix.MTRANS_Y]
+        if (sx <= 0f) return floatArrayOf(0f, 0f)
+        return floatArrayOf((width / 2f - tx) / sx, (height / 2f - ty) / sx)
+    }
+
+    /** Restore [zoom] with the doc point ([docX], [docY]) centred in the viewport. */
+    private fun restoreView(zoom: Float, docX: Float, docY: Float) {
+        val scale = fitScale * zoom
+        matrix.reset()
+        matrix.postScale(scale, scale)
+        matrix.postTranslate(width / 2f - docX * scale, height / 2f - docY * scale)
         clampMatrix()
     }
 
@@ -722,7 +820,7 @@ class PdfDocumentView @JvmOverloads constructor(
         val key = CacheKey(pageIndex, scaleBucket)
         if (inFlightRenders.containsKey(key)) return
         if (bitmapCache.get(key) != null) return
-        val renderScale = fitScale * scaleBucketToZoom(scaleBucket)
+        val renderScale = cappedRenderScale(pageIndex, fitScale * scaleBucketToZoom(scaleBucket))
         val job = scope.launch(Dispatchers.Main.immediate) {
             val bitmap = r.renderPage(pageIndex, renderScale) ?: run {
                 inFlightRenders.remove(key)
@@ -743,6 +841,28 @@ class PdfDocumentView @JvmOverloads constructor(
     private fun cancelAllRenders() {
         for ((_, job) in inFlightRenders) job.cancel()
         inFlightRenders.clear()
+    }
+
+    /**
+     * Clamp a desired render scale so a single page bitmap never exceeds
+     * [MAX_BITMAP_BYTES] or [MAX_DIM] on either axis. Without this, high zoom
+     * buckets render multi-hundred-MB bitmaps that either OOM or — being larger
+     * than the LRU cache — get evicted the instant they are inserted, producing
+     * an endless render→evict→invalidate loop that looks like the page "snapping
+     * back" to a low-resolution view. Capping keeps every render cacheable and
+     * stable; extreme zoom is rendered a touch soft rather than thrashing.
+     */
+    private fun cappedRenderScale(pageIndex: Int, desired: Float): Float {
+        val sz = pageSizes.getOrNull(pageIndex) ?: return desired
+        val wPt = sz.width
+        val hPt = sz.height
+        if (wPt <= 0f || hPt <= 0f) return desired
+        var s = desired
+        val maxByDim = min(MAX_DIM / wPt, MAX_DIM / hPt)
+        if (s > maxByDim) s = maxByDim
+        val maxByBytes = sqrt(MAX_BITMAP_BYTES.toDouble() / (4.0 * wPt * hPt)).toFloat()
+        if (s > maxByBytes) s = maxByBytes
+        return max(s, 0.1f)
     }
 
     private fun scaleBucketFor(zoom: Float): Int = when {
@@ -789,7 +909,17 @@ class PdfDocumentView @JvmOverloads constructor(
         /** 1pt vertical gap between pages (vertical mode) or horizontal (horizontal mode). */
         private const val GAP_PTS = 6f
 
-        /** ~80 MB upper bound on cached bitmaps; sized by byteCount, not entry count. */
-        private const val CACHE_MAX_BYTES = 80 * 1024 * 1024
+        /** ~96 MB upper bound on cached bitmaps; sized by byteCount, not entry count.
+         *  On API 26+ bitmap pixels live in the native heap, so this does not count
+         *  against the Dalvik heap budget. */
+        private const val CACHE_MAX_BYTES = 96 * 1024 * 1024
+
+        /** Per-bitmap ceiling. Must stay well under [CACHE_MAX_BYTES] so a freshly
+         *  rendered page is never larger than the cache (which would evict it on
+         *  insertion). 32 MB ≈ an 8-megapixel ARGB_8888 bitmap. */
+        private const val MAX_BITMAP_BYTES = 32 * 1024 * 1024
+
+        /** Hard cap on either bitmap dimension. */
+        private const val MAX_DIM = 4096f
     }
 }

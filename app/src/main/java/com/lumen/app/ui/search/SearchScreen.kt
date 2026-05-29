@@ -103,7 +103,7 @@ import com.lumen.app.ui.theme.AmberAccent
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel = hiltViewModel(),
-    onResultClick: (uri: String, page: Int, filename: String, keyword: String) -> Unit = { _, _, _, _ -> },
+    onResultClick: (uri: String, page: Int, filename: String, keyword: String, occurrence: Int) -> Unit = { _, _, _, _, _ -> },
     onOpenLibrary: () -> Unit = {},
 ) {
     val query by viewModel.query.collectAsState()
@@ -203,9 +203,9 @@ fun SearchScreen(
                     query = query,
                     results = results,
                     isTruncated = isTruncated,
-                    onResultClick = { uri, page, filename ->
+                    onResultClick = { uri, page, filename, occurrence ->
                         viewModel.onResultSelected(query.trim())
-                        onResultClick(uri, page, filename, query.trim())
+                        onResultClick(uri, page, filename, query.trim(), occurrence)
                     },
                 )
             }
@@ -430,7 +430,7 @@ private fun ResultList(
     query: String,
     results: List<SearchResult>,
     isTruncated: Boolean,
-    onResultClick: (uri: String, page: Int, filename: String) -> Unit,
+    onResultClick: (uri: String, page: Int, filename: String, occurrence: Int) -> Unit,
 ) {
     val label = if (results.size == 1) "1 result" else "${results.size} results"
     LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -451,7 +451,7 @@ private fun ResultList(
                 ResultRow(
                     query = query,
                     result = result,
-                    onClick = { onResultClick(result.uri, result.pageNumber, result.filename) },
+                    onClick = { onResultClick(result.uri, result.pageNumber, result.filename, result.occurrenceOnPage) },
                 )
             }
         }

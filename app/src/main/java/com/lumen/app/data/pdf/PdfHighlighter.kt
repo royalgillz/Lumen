@@ -3,6 +3,7 @@ package com.lumen.app.data.pdf
 import android.content.Context
 import android.graphics.RectF
 import android.net.Uri
+import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Quad
 import com.artifex.mupdf.fitz.StructuredText
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -15,6 +16,7 @@ class PdfHighlighter @Inject constructor(
 ) {
 
     data class PageHighlights(
+        val pageIndex: Int,
         val rects: List<RectF>,
         val pageWidthPts: Float,
         val pageHeightPts: Float,
@@ -32,32 +34,60 @@ class PdfHighlighter @Inject constructor(
         keyword: String,
         password: String? = null,
     ): PageHighlights {
-        if (keyword.isBlank()) return EMPTY
+        if (keyword.isBlank()) return empty(pageIndex)
         return withMuPdfDocument(context, uri, password) { doc ->
-            if (pageIndex !in 0 until doc.countPages()) return@withMuPdfDocument EMPTY
-            val page = runCatching { doc.loadPage(pageIndex) }.getOrNull()
-                ?: return@withMuPdfDocument EMPTY
-            try {
-                val bounds = page.bounds
-                val pageWidthPts = bounds.x1 - bounds.x0
-                val pageHeightPts = bounds.y1 - bounds.y0
-                val stext = runCatching { page.toStructuredText("preserve-whitespace") }.getOrNull()
-                    ?: return@withMuPdfDocument PageHighlights(emptyList(), pageWidthPts, pageHeightPts)
-                try {
-                    val rects = extractKeywordRects(stext, keyword, bounds.x0, bounds.y0)
-                    PageHighlights(rects, pageWidthPts, pageHeightPts)
-                } finally {
-                    runCatching { stext.destroy() }
-                }
-            } catch (_: OutOfMemoryError) {
-                EMPTY
-            } catch (_: Throwable) {
-                EMPTY
-            } finally {
-                runCatching { page.destroy() }
-            }
-        } ?: EMPTY
+            extractForPage(doc, pageIndex, keyword)
+        } ?: empty(pageIndex)
     }
+
+    /**
+     * Batch variant: compute highlight rects for every page in [pages] while opening
+     * the document only once. This is the single source of truth for in-document
+     * search — the enumerated rects are exactly what gets navigated and drawn, so an
+     * occurrence index can never point at a rect that doesn't exist.
+     */
+    fun findOnPages(
+        uri: Uri,
+        pages: List<Int>,
+        keyword: String,
+        password: String? = null,
+    ): List<PageHighlights> {
+        if (keyword.isBlank() || pages.isEmpty()) return emptyList()
+        return withMuPdfDocument(context, uri, password) { doc ->
+            val count = doc.countPages()
+            pages.asSequence()
+                .filter { it in 0 until count }
+                .distinct()
+                .map { extractForPage(doc, it, keyword) }
+                .toList()
+        } ?: emptyList()
+    }
+
+    private fun extractForPage(doc: Document, pageIndex: Int, keyword: String): PageHighlights {
+        if (pageIndex !in 0 until doc.countPages()) return empty(pageIndex)
+        val page = runCatching { doc.loadPage(pageIndex) }.getOrNull() ?: return empty(pageIndex)
+        return try {
+            val bounds = page.bounds
+            val pageWidthPts = bounds.x1 - bounds.x0
+            val pageHeightPts = bounds.y1 - bounds.y0
+            val stext = runCatching { page.toStructuredText("preserve-whitespace") }.getOrNull()
+                ?: return PageHighlights(pageIndex, emptyList(), pageWidthPts, pageHeightPts)
+            try {
+                val rects = extractKeywordRects(stext, keyword, bounds.x0, bounds.y0)
+                PageHighlights(pageIndex, rects, pageWidthPts, pageHeightPts)
+            } finally {
+                runCatching { stext.destroy() }
+            }
+        } catch (_: OutOfMemoryError) {
+            empty(pageIndex)
+        } catch (_: Throwable) {
+            empty(pageIndex)
+        } finally {
+            runCatching { page.destroy() }
+        }
+    }
+
+    private fun empty(pageIndex: Int) = PageHighlights(pageIndex, emptyList(), 0f, 0f)
 
     /**
      * Walks the structured-text tree once, building a parallel buffer of
@@ -162,8 +192,6 @@ class PdfHighlighter @Inject constructor(
     }
 
     private companion object {
-        val EMPTY = PageHighlights(emptyList(), 0f, 0f)
-
         // Marker Quad inserted between lines so index alignment is preserved
         // without contributing to keyword-spanning rect unions.
         val SENTINEL_QUAD = Quad(

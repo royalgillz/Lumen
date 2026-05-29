@@ -37,20 +37,22 @@ class TesseractOcrEngine @Inject constructor(
         }
     }
 
-    override suspend fun recognizeText(bitmap: Bitmap): String =
+    override suspend fun recognize(bitmap: Bitmap): OcrResult =
         withTimeoutOrNull(30_000L) {
             withContext(Dispatchers.IO) {
-                if (!trainedDataFile.exists()) return@withContext ""
+                if (!trainedDataFile.exists()) return@withContext OcrResult("")
                 val api = TessBaseAPI()
                 try {
-                    if (!api.init(tessDataParent.absolutePath, "eng")) return@withContext ""
+                    if (!api.init(tessDataParent.absolutePath, "eng")) return@withContext OcrResult("")
                     api.setImage(bitmap)
-                    api.getUTF8Text() ?: ""
+                    // Tesseract is only the fallback when ML Kit yields too little text;
+                    // we keep the text but skip word boxes here to stay simple.
+                    OcrResult(api.getUTF8Text() ?: "")
                 } catch (e: Exception) {
-                    ""
+                    OcrResult("")
                 } finally {
                     api.recycle()
                 }
             }
-        } ?: ""
+        } ?: OcrResult("")
 }

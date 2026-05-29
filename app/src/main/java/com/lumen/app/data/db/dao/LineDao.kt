@@ -36,14 +36,14 @@ interface LineDao {
     suspend fun search(query: String, limit: Int = 201): List<SearchResultRow>
 
     @Query("""
-        SELECT p.pageNumber
+        SELECT DISTINCT p.pageNumber
         FROM lines_fts
         JOIN lines  AS l ON lines_fts.rowid = l.id
         JOIN pages  AS p ON l.pageId  = p.id
         JOIN documents AS d ON p.docId = d.id
         WHERE lines_fts MATCH :query
           AND d.uri = :docUri
-        ORDER BY p.pageNumber, l.lineNumber
+        ORDER BY p.pageNumber
     """)
     suspend fun searchPagesInDocument(query: String, docUri: String): List<Int>
 }

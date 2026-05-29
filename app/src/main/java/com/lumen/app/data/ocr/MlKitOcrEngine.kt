@@ -15,12 +15,26 @@ class MlKitOcrEngine @Inject constructor() : OcrEngine {
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-    override suspend fun recognizeText(bitmap: Bitmap): String =
+    override suspend fun recognize(bitmap: Bitmap): OcrResult =
         withTimeoutOrNull(20_000L) {
             suspendCancellableCoroutine { cont ->
                 recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                    .addOnSuccessListener { result -> if (cont.isActive) cont.resume(result.text) }
-                    .addOnFailureListener { if (cont.isActive) cont.resume("") }
+                    .addOnSuccessListener { result ->
+                        if (!cont.isActive) return@addOnSuccessListener
+                        val words = ArrayList<OcrWord>()
+                        for (block in result.textBlocks) {
+                            for (line in block.lines) {
+                                for (element in line.elements) {
+                                    val box = element.boundingBox ?: continue
+                                    if (element.text.isNotBlank()) {
+                                        words.add(OcrWord(element.text, box))
+                                    }
+                                }
+                            }
+                        }
+                        cont.resume(OcrResult(result.text, words))
+                    }
+                    .addOnFailureListener { if (cont.isActive) cont.resume(OcrResult("")) }
             }
-        } ?: ""
+        } ?: OcrResult("")
 }

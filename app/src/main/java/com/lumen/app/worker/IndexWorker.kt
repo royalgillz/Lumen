@@ -26,6 +26,7 @@ import com.lumen.app.data.db.LumenDatabase
 import com.lumen.app.data.fs.PdfFile
 import com.lumen.app.data.fs.PdfScanner
 import com.lumen.app.data.ocr.MlKitOcrEngine
+import com.lumen.app.data.ocr.OcrWordBoxes
 import com.lumen.app.data.ocr.TesseractOcrEngine
 import com.lumen.app.data.pdf.LineExtractor
 import com.lumen.app.data.pdf.PdfPageRenderer
@@ -124,17 +125,21 @@ class IndexWorker @AssistedInject constructor(
 
         // Pass 2: OCR, open PdfRenderer once for all pages that need it
         val ocrTexts = mutableMapOf<Int, String>()
+        val ocrBoxes = mutableMapOf<Int, String?>()
         val ocrPageIndices = pages.filter { it.needsOcr }.map { it.index }
         if (ocrPageIndices.isNotEmpty()) {
             pdfPageRenderer.renderPagesInSession(pdf.uri, ocrPageIndices) { pageIndex, bitmap ->
                 try {
-                    val mlText = mlKitOcrEngine.recognizeText(bitmap)
-                    ocrTexts[pageIndex] = if (mlText.length >= MIN_OCR_CHARS) {
-                        mlText
+                    val ml = mlKitOcrEngine.recognize(bitmap)
+                    val chosen = if (ml.text.length >= MIN_OCR_CHARS) {
+                        ml
                     } else {
-                        val tessText = tesseractOcrEngine.recognizeText(bitmap)
-                        if (tessText.length > mlText.length) tessText else mlText
+                        val tess = tesseractOcrEngine.recognize(bitmap)
+                        if (tess.text.length > ml.text.length) tess else ml
                     }
+                    ocrTexts[pageIndex] = chosen.text
+                    ocrBoxes[pageIndex] =
+                        OcrWordBoxes.encode(chosen.words, bitmap.width, bitmap.height)
                 } catch (_: Exception) {
                     // Page OCR failed; PdfBox text (or empty string) will be used instead
                 }
@@ -149,7 +154,13 @@ class IndexWorker @AssistedInject constructor(
                 val wordCount = finalText.trim()
                     .split("\\s+".toRegex()).count { it.isNotEmpty() }
                 val pageId = pageDao.insert(
-                    PageEntity(docId = docId, pageNumber = page.index, isOcr = usedOcr, wordCount = wordCount)
+                    PageEntity(
+                        docId = docId,
+                        pageNumber = page.index,
+                        isOcr = usedOcr,
+                        wordCount = wordCount,
+                        wordBoxesJson = if (usedOcr) ocrBoxes[page.index] else null,
+                    )
                 )
                 val lines = lineExtractor.extract(finalText).mapIndexed { i, lineText ->
                     LineContentEntity(pageId = pageId, lineNumber = i, text = lineText)

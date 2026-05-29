@@ -19,7 +19,7 @@ import com.lumen.app.data.db.entity.PageEntity
         LineContentEntity::class,
         LineEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class LumenDatabase : RoomDatabase() {
@@ -33,6 +33,15 @@ abstract class LumenDatabase : RoomDatabase() {
                 database.execSQL(
                     "ALTER TABLE documents ADD COLUMN treeUri TEXT NOT NULL DEFAULT ''"
                 )
+            }
+        }
+
+        // Adds OCR word boxes. Non-destructive so the existing index is preserved;
+        // already-indexed scanned pages simply have null boxes (no highlight) until
+        // they are re-indexed.
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE pages ADD COLUMN wordBoxesJson TEXT")
             }
         }
     }
