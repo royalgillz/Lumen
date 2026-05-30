@@ -1,6 +1,6 @@
 # Privacy Policy — Lumen
 
-**Last updated: May 2026**
+**Applies to: Lumen v1.0 · Last updated: May 2026**
 
 Lumen collects no data. Here is exactly what happens on your device:
 
