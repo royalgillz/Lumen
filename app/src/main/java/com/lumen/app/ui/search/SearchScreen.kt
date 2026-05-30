@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -92,6 +93,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
@@ -113,6 +115,7 @@ fun SearchScreen(
     val indexedCount by viewModel.indexedCount.collectAsState()
     val isIndexing by viewModel.isIndexing.collectAsState()
     val searchHistory by viewModel.searchHistory.collectAsState()
+    val recentDocuments by viewModel.recentDocuments.collectAsState()
     val availableFolders by viewModel.availableFolders.collectAsState()
     val filters by viewModel.filters.collectAsState()
 
@@ -191,6 +194,10 @@ fun SearchScreen(
                 )
                 query.trim().length < 2 -> SearchEmptyState(
                     indexedCount = indexedCount,
+                    recentSearches = searchHistory,
+                    recentDocuments = recentDocuments,
+                    onSelectRecentSearch = { viewModel.query.value = it },
+                    onOpenDocument = { doc -> onResultClick(doc.uri, 0, doc.filename, "", 0) },
                     onOpenLibrary = onOpenLibrary,
                 )
                 isSearching -> SkeletonResultList()
@@ -786,54 +793,150 @@ private fun ActiveFiltersRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SearchEmptyState(indexedCount: Int, onOpenLibrary: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top,
-    ) {
-        Spacer(Modifier.height(72.dp))
-        Box(
-            modifier = Modifier.size(72.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(22.dp)),
-            contentAlignment = Alignment.Center,
+private fun SearchEmptyState(
+    indexedCount: Int,
+    recentSearches: List<String>,
+    recentDocuments: List<DocumentEntity>,
+    onSelectRecentSearch: (String) -> Unit,
+    onOpenDocument: (DocumentEntity) -> Unit,
+    onOpenLibrary: () -> Unit,
+) {
+    // Nothing indexed yet — keep the original onboarding-style prompt.
+    if (indexedCount == 0) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Spacer(Modifier.height(96.dp))
+            Box(
+                modifier = Modifier.size(72.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(22.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(26.dp))
-                Box(
-                    modifier = Modifier
-                        .padding(top = 4.dp)
-                        .size(16.dp, 3.dp)
-                        .background(AmberAccent.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
-                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Text("Nothing indexed yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Add a folder of PDFs to start searching offline.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = onOpenLibrary) {
+                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.size(8.dp))
+                Text("Add a folder")
             }
         }
-        Spacer(Modifier.height(16.dp))
-        Text("What are you looking for?", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground)
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = if (indexedCount > 0)
-                "Search across $indexedCount indexed ${if (indexedCount == 1) "PDF" else "PDFs"}"
-            else
-                "Add a folder in the library to start searching",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(16.dp))
-        OutlinedButton(onClick = onOpenLibrary) {
-            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.size(8.dp))
-            Text("Go to library")
+        return
+    }
+
+    // Has content — make the home screen useful: recent searches + recent documents.
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 24.dp),
+    ) {
+        if (recentSearches.isNotEmpty()) {
+            item {
+                Text(
+                    "Recent searches",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 8.dp),
+                )
+            }
+            item {
+                FlowRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    recentSearches.take(8).forEach { term ->
+                        Surface(
+                            onClick = { onSelectRecentSearch(term) },
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.width(6.dp))
+                                Text(term, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
         }
-        if (indexedCount > 0) {
-            Spacer(Modifier.height(24.dp))
+
+        if (recentDocuments.isNotEmpty()) {
+            item {
+                Text(
+                    "Recently indexed",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+                )
+            }
+            items(recentDocuments, key = { it.id }) { doc ->
+                RecentDocumentRow(doc = doc, onClick = { onOpenDocument(doc) })
+            }
+        }
+
+        item {
             Text(
                 text = "Tip: Use multiple words for AND matching — \"climate policy 2024\" finds lines containing all three terms.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 20.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecentDocumentRow(doc: DocumentEntity, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = 36.dp, height = 48.dp)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            PdfThumbnail(
+                uriString = doc.uri,
+                pageIndex = 0,
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)),
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = doc.filename,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "${doc.pageCount} ${if (doc.pageCount == 1) "page" else "pages"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

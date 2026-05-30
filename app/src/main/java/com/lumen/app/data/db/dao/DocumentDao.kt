@@ -45,6 +45,10 @@ interface DocumentDao {
     @Query("SELECT COUNT(*) FROM documents WHERE status = 'indexed'")
     fun observeIndexedCount(): Flow<Int>
 
+    // Most recently indexed documents, for the Search home screen.
+    @Query("SELECT * FROM documents WHERE status = 'indexed' ORDER BY indexedAt DESC LIMIT :limit")
+    fun observeRecentlyIndexed(limit: Int = 8): Flow<List<DocumentEntity>>
+
     @Query("SELECT * FROM documents WHERE status = 'pending' OR status = 'error'")
     suspend fun getPendingOrError(): List<DocumentEntity>
 

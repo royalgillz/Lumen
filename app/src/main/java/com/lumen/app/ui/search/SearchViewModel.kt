@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
@@ -60,6 +61,10 @@ class SearchViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val searchHistory: StateFlow<List<String>> = safRepository.searchHistory
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // Recently indexed documents, surfaced on the Search home screen.
+    val recentDocuments: StateFlow<List<DocumentEntity>> = documentDao.observeRecentlyIndexed(8)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val availableFolders: StateFlow<Set<Uri>> = safRepository.folderUris

@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.ui.common.PdfThumbnail
+import com.lumen.app.ui.common.folderDisplayName
 import com.lumen.app.ui.theme.AmberAccent
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
@@ -584,7 +585,7 @@ private fun FolderRow(
             )
             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text(
-                    text = uri.lastPathSegment ?: uri.toString(),
+                    text = folderDisplayName(uri),
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

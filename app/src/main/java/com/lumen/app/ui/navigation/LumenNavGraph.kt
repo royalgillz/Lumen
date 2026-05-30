@@ -2,6 +2,10 @@ package com.lumen.app.ui.navigation
 
 import android.net.Uri
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -13,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
@@ -28,7 +33,6 @@ import com.lumen.app.ui.onboarding.OnboardingScreen
 import com.lumen.app.ui.onboarding.OnboardingViewModel
 import com.lumen.app.ui.icons.LibraryTabIcon
 import com.lumen.app.ui.icons.SearchTabIcon
-import com.lumen.app.ui.icons.SettingsTabIcon
 import com.lumen.app.ui.search.SearchScreen
 import com.lumen.app.ui.settings.SettingsScreen
 import androidx.compose.material3.MaterialTheme
@@ -66,7 +70,12 @@ private val TABS = listOf(
         LibraryTabIcon(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
     },
     Tab(Screen.Settings, "Settings") { selected ->
-        SettingsTabIcon(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+        Icon(
+            imageVector = Icons.Filled.Settings,
+            contentDescription = null,
+            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(24.dp),
+        )
     },
 )
 
