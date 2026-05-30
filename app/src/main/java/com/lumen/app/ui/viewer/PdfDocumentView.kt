@@ -146,6 +146,33 @@ class PdfDocumentView @JvmOverloads constructor(
     }
     private val bitmapPaint = Paint().apply { isFilterBitmap = true; isAntiAlias = false }
 
+    // ── Fast-scroll thumb (Drive-style) ───────────────────────────────────────
+    private val scrollThumbPaint = Paint().apply {
+        color = 0xCC_9E9E9E.toInt()
+        isAntiAlias = true
+    }
+    private val scrollThumbActivePaint = Paint().apply {
+        color = 0xFF_D4A24C.toInt() // AmberAccent
+        isAntiAlias = true
+    }
+    private val bubblePaint = Paint().apply {
+        color = 0xF0_2A4D3A.toInt() // ForestGreen, near-opaque
+        isAntiAlias = true
+    }
+    private val bubbleTextPaint = Paint().apply {
+        color = Color.WHITE
+        isAntiAlias = true
+        textAlign = Paint.Align.CENTER
+        textSize = context.resources.displayMetrics.scaledDensity * 14f
+    }
+    private val density = context.resources.displayMetrics.density
+    /** 0..1 alpha for the auto-hiding thumb. */
+    private var scrollbarAlpha = 0f
+    private var scrollbarAnimator: ValueAnimator? = null
+    private var isDraggingThumb = false
+    private var thumbGrabOffsetY = 0f
+    private val hideScrollbarRunnable = Runnable { fadeScrollbar(false) }
+
     private val scaleDetector: ScaleGestureDetector
     private val gestureDetector: GestureDetector
     private val scroller = OverScroller(context, DecelerateInterpolator())
@@ -372,6 +399,8 @@ class PdfDocumentView @JvmOverloads constructor(
         runCatching { context.unregisterComponentCallbacks(memoryCallbacks) }
         flingJob?.let { removeCallbacks(it) }
         flingJob = null
+        removeCallbacks(hideScrollbarRunnable)
+        scrollbarAnimator?.cancel()
         animator?.cancel()
         scope.cancel()
         bitmapCache.evictAll()
@@ -402,6 +431,9 @@ class PdfDocumentView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Fast-scroll thumb takes priority over pan/zoom when grabbed.
+        if (handleThumbTouch(event)) return true
+
         var handled = scaleDetector.onTouchEvent(event)
         if (!scaleDetector.isInProgress) {
             handled = gestureDetector.onTouchEvent(event) || handled
@@ -411,6 +443,42 @@ class PdfDocumentView @JvmOverloads constructor(
             animator?.cancel()
         }
         return handled || super.onTouchEvent(event)
+    }
+
+    private fun handleThumbTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (thumbIsScrollable() && scrollbarAlpha > 0.05f && thumbHitRect().contains(event.x, event.y)) {
+                    isDraggingThumb = true
+                    thumbGrabOffsetY = event.y - thumbTopPx()
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    scroller.forceFinished(true)
+                    animator?.cancel()
+                    removeCallbacks(hideScrollbarRunnable)
+                    fadeScrollbar(true)
+                    invalidate()
+                    return true
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (isDraggingThumb) {
+                    val track = (height - thumbHeightPx()).coerceAtLeast(1f)
+                    val newTop = (event.y - thumbGrabOffsetY).coerceIn(0f, track)
+                    scrollToProgress(newTop / track)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (isDraggingThumb) {
+                    isDraggingThumb = false
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    pokeScrollbar()
+                    invalidate()
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -463,6 +531,7 @@ class PdfDocumentView @JvmOverloads constructor(
                 }
             }
         }
+        drawScrollbar(canvas)
     }
 
     private fun drawAnyAvailableBitmap(canvas: Canvas, pageIndex: Int, screenRect: RectF) {
@@ -673,6 +742,122 @@ class PdfDocumentView @JvmOverloads constructor(
         return if (docPixH <= height) (height - docPixH) / 2f else ty.coerceIn(height - docPixH, 0f)
     }
 
+    // ── Fast-scroll thumb geometry ────────────────────────────────────────────
+    //
+    // The thumb only applies to vertical mode (the continuous-canvas case). It maps
+    // the visible window's position within the whole document height to a draggable
+    // handle on the right edge; dragging translates the matrix proportionally.
+
+    /** 0..1 scroll progress of the viewport top within the scrollable range. */
+    private fun scrollProgress(): Float {
+        matrix.getValues(matrixValues)
+        val scale = matrixValues[Matrix.MSCALE_X]
+        val docPixH = docContentHeight * scale
+        val range = docPixH - height
+        if (range <= 0f) return 0f
+        val ty = matrixValues[Matrix.MTRANS_Y]
+        return (-ty / range).coerceIn(0f, 1f)
+    }
+
+    private fun thumbHeightPx(): Float {
+        matrix.getValues(matrixValues)
+        val scale = matrixValues[Matrix.MSCALE_X]
+        val docPixH = docContentHeight * scale
+        if (docPixH <= height) return 0f
+        val ideal = height * (height / docPixH)
+        return ideal.coerceIn(THUMB_MIN_H_DP * density, height * 0.9f)
+    }
+
+    private fun thumbTopPx(): Float {
+        val track = height - thumbHeightPx()
+        return track * scrollProgress()
+    }
+
+    private fun thumbIsScrollable(): Boolean {
+        if (scrollHorizontal) return false
+        matrix.getValues(matrixValues)
+        val scale = matrixValues[Matrix.MSCALE_X]
+        return docContentHeight * scale > height + 1f
+    }
+
+    private fun thumbHitRect(): RectF {
+        val w = THUMB_W_DP * density
+        val top = thumbTopPx()
+        // Generous horizontal touch slop so the thin thumb is grabbable.
+        return RectF(width - w * 3f, top, width.toFloat(), top + thumbHeightPx())
+    }
+
+    /** Scroll the document so the viewport top sits at [progress] (0..1). */
+    private fun scrollToProgress(progress: Float) {
+        matrix.getValues(matrixValues)
+        val scale = matrixValues[Matrix.MSCALE_X]
+        val docPixH = docContentHeight * scale
+        val range = docPixH - height
+        if (range <= 0f) return
+        val targetTy = -(progress.coerceIn(0f, 1f) * range)
+        val curTy = matrixValues[Matrix.MTRANS_Y]
+        matrix.postTranslate(0f, targetTy - curTy)
+        clampMatrix()
+        invalidate()
+        maybeEmitPageChange()
+    }
+
+    /** Show the thumb, then schedule it to fade after an idle delay. */
+    private fun pokeScrollbar() {
+        if (!thumbIsScrollable()) return
+        fadeScrollbar(true)
+        removeCallbacks(hideScrollbarRunnable)
+        if (!isDraggingThumb) postDelayed(hideScrollbarRunnable, SCROLLBAR_IDLE_MS)
+    }
+
+    private fun fadeScrollbar(show: Boolean) {
+        val target = if (show) 1f else 0f
+        if (scrollbarAlpha == target && scrollbarAnimator == null) return
+        scrollbarAnimator?.cancel()
+        scrollbarAnimator = ValueAnimator.ofFloat(scrollbarAlpha, target).apply {
+            duration = if (show) 120 else 280
+            addUpdateListener {
+                scrollbarAlpha = it.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+    }
+
+    private fun drawScrollbar(canvas: Canvas) {
+        if (!thumbIsScrollable() || scrollbarAlpha <= 0.01f) return
+        val w = THUMB_W_DP * density
+        val margin = THUMB_MARGIN_DP * density
+        val top = thumbTopPx()
+        val h = thumbHeightPx()
+        val left = width - w - margin
+        val radius = w / 2f
+        val paint = if (isDraggingThumb) scrollThumbActivePaint else scrollThumbPaint
+        val savedAlpha = paint.alpha
+        paint.alpha = (savedAlpha * scrollbarAlpha).toInt()
+        canvas.drawRoundRect(left, top, left + w, top + h, radius, radius, paint)
+        paint.alpha = savedAlpha
+
+        // Page bubble while dragging.
+        if (isDraggingThumb && pageCount > 0) {
+            val label = "p. ${currentPageIndex() + 1}"
+            val padH = 14f * density
+            val padV = 8f * density
+            val textW = bubbleTextPaint.measureText(label)
+            val bubbleW = textW + padH * 2
+            val bubbleH = (bubbleTextPaint.descent() - bubbleTextPaint.ascent()) + padV * 2
+            val bubbleRight = left - 8f * density
+            val bubbleLeft = bubbleRight - bubbleW
+            val bubbleTop = (top + h / 2f - bubbleH / 2f).coerceIn(0f, height - bubbleH)
+            canvas.drawRoundRect(
+                bubbleLeft, bubbleTop, bubbleRight, bubbleTop + bubbleH,
+                bubbleH / 2f, bubbleH / 2f, bubblePaint,
+            )
+            val textY = bubbleTop + padV - bubbleTextPaint.ascent()
+            canvas.drawText(label, bubbleLeft + bubbleW / 2f, textY, bubbleTextPaint)
+        }
+    }
+
     // ── Gestures ──────────────────────────────────────────────────────────────
 
     private inner class ScaleListener : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -710,6 +895,7 @@ class PdfDocumentView @JvmOverloads constructor(
             clampMatrix()
             invalidate()
             maybeEmitPageChange()
+            pokeScrollbar()
             return true
         }
 
@@ -999,5 +1185,11 @@ class PdfDocumentView @JvmOverloads constructor(
 
         /** Hard cap on either bitmap dimension. */
         private const val MAX_DIM = 4096f
+
+        // Fast-scroll thumb
+        private const val THUMB_W_DP = 6f
+        private const val THUMB_MARGIN_DP = 3f
+        private const val THUMB_MIN_H_DP = 40f
+        private const val SCROLLBAR_IDLE_MS = 1500L
     }
 }
