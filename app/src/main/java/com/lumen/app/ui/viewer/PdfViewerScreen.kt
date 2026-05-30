@@ -59,7 +59,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -117,9 +116,9 @@ fun PdfViewerScreen(
 
     val documentState by viewModel.documentState.collectAsState()
     val scrollHorizontal by viewModel.scrollHorizontal.collectAsState()
-    val highlightSkipped by viewModel.highlightSkipped.collectAsState()
-    val occurrences by viewModel.occurrences.collectAsState()
-    val activeOccurrence by viewModel.activeOccurrence.collectAsState()
+    val matchPages by viewModel.matchPages.collectAsState()
+    val occurrenceOrdinal by viewModel.occurrenceOrdinal.collectAsState()
+    val occurrenceTotal by viewModel.occurrenceTotal.collectAsState()
     val activePage by viewModel.activePage.collectAsState()
     val activeRectIndexOnPage by viewModel.activeRectIndexOnPage.collectAsState()
     val pageHighlights by viewModel.pageHighlights.collectAsState()
@@ -263,15 +262,21 @@ fun PdfViewerScreen(
         }
     }
 
-    // Bring the active occurrence's page into view. Keyed on page only, so stepping
-    // between occurrences on the same page doesn't re-snap to the page top — the
-    // highlight overlay below handles centering the active rect.
+    // Bring the active match's page into view. Keyed on page only, so it doesn't
+    // re-snap while the user scrolls within the page.
     LaunchedEffect(activePage) {
         if (activePage >= 0) pdfDocView.value?.jumpToPage(activePage, animate = true)
     }
 
+    // Lazily compute highlight rects for whatever page is on screen (a no-op for
+    // non-match pages and already-computed pages). Covers both search jumps and
+    // manual scrolling onto a match page.
+    LaunchedEffect(displayPage.intValue, matchPages) {
+        viewModel.ensurePageHighlights(displayPage.intValue)
+    }
+
     // Draw the highlights for whichever page is currently shown, emphasising the
-    // active occurrence only when its page is the one on screen. Because each
+    // active match only when its page is the one on screen. Because each
     // PageHighlights carries its own page index, rects can never be drawn on the
     // wrong page.
     LaunchedEffect(displayPage.intValue, pageHighlights, activePage, activeRectIndexOnPage) {
@@ -282,17 +287,6 @@ fun PdfViewerScreen(
             v.setHighlight(ph.pageIndex, ph.rects, ph.pageWidthPts, ph.pageHeightPts, activeIdx)
         } else {
             v.clearHighlight()
-        }
-    }
-
-    // Highlight-skipped snackbar
-    LaunchedEffect(highlightSkipped) {
-        if (highlightSkipped) {
-            snackbarHostState.showSnackbar(
-                message = "Highlights not shown — PDF exceeds 50 MB",
-                duration = SnackbarDuration.Short,
-            )
-            viewModel.resetHighlightSkipped()
         }
     }
 
@@ -648,15 +642,15 @@ fun PdfViewerScreen(
                                 ),
                                 textStyle = MaterialTheme.typography.bodyMedium,
                             )
-                            if (occurrences.isNotEmpty()) {
+                            if (matchPages.isNotEmpty()) {
                                 Text(
-                                    text = "${activeOccurrence + 1} / ${occurrences.size}",
+                                    text = "${occurrenceOrdinal.coerceAtLeast(1)} / ${occurrenceTotal.coerceAtLeast(1)}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 4.dp),
                                 )
-                                val canNavigate = occurrences.size > 1
+                                val canNavigate = occurrenceTotal > 1
                                 IconButton(
                                     onClick = { viewModel.prevOccurrence() },
                                     enabled = canNavigate,

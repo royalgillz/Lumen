@@ -14,6 +14,8 @@ import com.lumen.app.data.repository.SearchRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -32,14 +34,9 @@ class PdfViewerViewModel @Inject constructor(
 ) : AndroidViewModel(application) {
 
     private companion object {
-        /** Skip highlight computation for PDFs above this size — they OOM on
-         *  mid-range devices even with MuPDF's incremental parser. */
-        private const val MAX_HIGHLIGHT_PDF_BYTES = 50L * 1024L * 1024L
-
-        /** Upper bound on match pages scanned per in-document search, to keep a
-         *  query on a huge document from scanning hundreds of pages of structured
-         *  text on every keystroke. */
-        private const val MAX_MATCH_PAGES = 300
+        /** Upper bound on the match-page navigation list per in-document search.
+         *  Bounds the page list + lazy compute fan-out, not an up-front scan. */
+        private const val MAX_MATCH_PAGES = 1000
     }
 
     // ── Document lifecycle ────────────────────────────────────────────────────
@@ -125,44 +122,63 @@ class PdfViewerViewModel @Inject constructor(
         return if (msg.isNotBlank()) msg else "Unable to open this PDF."
     }
 
-    // ── In-document search (occurrence model) ─────────────────────────────────
+    // ── In-document search (match-page model, lazy per-page highlights) ────────
     //
-    // The MuPDF highlighter is the single source of truth: we enumerate every real
-    // occurrence rect across the candidate pages, so the count, the active index,
-    // and the drawn rects can never disagree. Navigation walks a flat list, so it
-    // is synchronous and immune to fast-tap races and to page/text mismatches.
+    // Navigation is page-based: the FTS index gives the matching pages cheaply
+    // (size-independent), and the user steps page to page. Highlight rects are
+    // produced per page on demand:
+    //   • OCR/scanned page → from word boxes stored at index time (a free DB read);
+    //     always drawn, no size check.
+    //   • Text-layer page  → MuPDF structured text for that one page only, computed
+    //     lazily when the page is visited, gated, with a per-page OOM catch. If a
+    //     single heavy page fails it yields empty rects and search still navigates
+    //     there; it just doesn't paint on that page.
+    // No whole-file size gate exists: search and OCR highlights work at any size.
 
-    data class Occurrence(val page: Int, val rectIndex: Int)
+    private val _matchPages = MutableStateFlow<List<Int>>(emptyList())
+    val matchPages: StateFlow<List<Int>> = _matchPages.asStateFlow()
 
-    private val _occurrences = MutableStateFlow<List<Occurrence>>(emptyList())
-    val occurrences: StateFlow<List<Occurrence>> = _occurrences.asStateFlow()
+    /** 1-based ordinal of the active occurrence across the whole document; 0 = none. */
+    private val _occurrenceOrdinal = MutableStateFlow(0)
+    val occurrenceOrdinal: StateFlow<Int> = _occurrenceOrdinal.asStateFlow()
 
-    private val _activeOccurrence = MutableStateFlow(0)
-    val activeOccurrence: StateFlow<Int> = _activeOccurrence.asStateFlow()
+    /** Total occurrences known so far. Grows as the background gated counting pass
+     *  finishes scanning match pages; settles at the true total. */
+    private val _occurrenceTotal = MutableStateFlow(0)
+    val occurrenceTotal: StateFlow<Int> = _occurrenceTotal.asStateFlow()
 
     /** Page to bring into view for the active occurrence; -1 when none. */
     private val _activePage = MutableStateFlow(-1)
     val activePage: StateFlow<Int> = _activePage.asStateFlow()
 
-    /** Rect index of the active occurrence within its page; -1 when none. */
+    /** Rect on the active page to emphasise; -1 when none / not yet known. */
     private val _activeRectIndexOnPage = MutableStateFlow(-1)
     val activeRectIndexOnPage: StateFlow<Int> = _activeRectIndexOnPage.asStateFlow()
 
-    /** Per-page highlight rects for drawing, keyed by page index. */
+    /** Lazily-populated per-page highlight rects, keyed by page index. An entry with
+     *  empty rects means "computed, nothing to draw" and is not recomputed. */
     private val _pageHighlights = MutableStateFlow<Map<Int, PdfHighlighter.PageHighlights>>(emptyMap())
     val pageHighlights: StateFlow<Map<Int, PdfHighlighter.PageHighlights>> = _pageHighlights.asStateFlow()
 
-    private val _highlightSkipped = MutableStateFlow(false)
-    val highlightSkipped: StateFlow<Boolean> = _highlightSkipped.asStateFlow()
-
     private var searchJob: Job? = null
+    private var countJob: Job? = null
+    private var navJob: Job? = null
+    // Serialises mutations to the rect cache + derived counts across the count pass,
+    // navigation, and on-demand page computes.
+    private val cacheMutex = kotlinx.coroutines.sync.Mutex()
 
-    fun highlightsForPage(page: Int): PdfHighlighter.PageHighlights? = _pageHighlights.value[page]
+    // Context retained so a page's rects can be computed lazily on visit.
+    private var searchDocUri: String = ""
+    private var searchUri: Uri? = null
+    private var searchKeyword: String = ""
+    private var searchPassword: String? = null
 
     /**
-     * Enumerate every occurrence of [keyword] across the document's match pages and
-     * position the active occurrence. [preferredPage]/[preferredOccurrence] let a
-     * global-search result open directly on the exact match the user tapped.
+     * Run an in-document search for [keyword]. Always proceeds regardless of file
+     * size. Lists matching pages from the FTS index, positions the active occurrence,
+     * and kicks off a background gated pass that counts occurrences per page so the
+     * total settles to its true value. [preferredPage]/[preferredOccurrence] let a
+     * global-search result open on the exact occurrence the user tapped.
      */
     fun runInDocumentSearch(
         docUri: String,
@@ -172,124 +188,214 @@ class PdfViewerViewModel @Inject constructor(
         preferredOccurrence: Int = 0,
     ) {
         searchJob?.cancel()
+        countJob?.cancel()
+        navJob?.cancel()
         val trimmed = keyword.trim()
         if (trimmed.length < 2) {
             resetSearch()
             return
         }
         val parsedUri = runCatching { Uri.parse(docUri) }.getOrNull() ?: run { resetSearch(); return }
-        if (!canSafelyComputeHighlights(parsedUri)) {
-            resetSearch()
-            _highlightSkipped.value = true
-            return
-        }
-        _highlightSkipped.value = false
         val sanitized = FtsQuerySanitizer.sanitize(trimmed) ?: run { resetSearch(); return }
+        searchDocUri = docUri
+        searchUri = parsedUri
+        searchKeyword = trimmed
+        searchPassword = password
         searchJob = viewModelScope.launch(Dispatchers.IO) {
             val pages = searchRepository.searchPagesInDocument(sanitized, docUri).take(MAX_MATCH_PAGES)
-            // Scanned (OCR) pages have no PDF text layer, so MuPDF finds nothing —
-            // use the word boxes captured at index time. Text-layer pages use MuPDF
-            // (char-precise). Both produce the same PageHighlights shape.
-            val ocrHls = ocrHighlightsForPages(docUri, pages, trimmed)
-            val textPages = pages.filter { it !in ocrHls.keys }
-            val textHls = pdfHighlighter.findOnPages(parsedUri, textPages, trimmed, password)
-                .associateBy { it.pageIndex }
-            val cache = LinkedHashMap<Int, PdfHighlighter.PageHighlights>()
-            val occ = ArrayList<Occurrence>()
-            for (page in pages) {
-                val ph = ocrHls[page] ?: textHls[page]
-                if (ph == null || ph.rects.isEmpty()) continue
-                cache[page] = ph
-                for (r in ph.rects.indices) occ.add(Occurrence(page, r))
+            _pageHighlights.value = emptyMap()
+            _occurrenceTotal.value = 0
+            _occurrenceOrdinal.value = 0
+            _matchPages.value = pages
+            if (pages.isEmpty()) {
+                _activePage.value = -1
+                _activeRectIndexOnPage.value = -1
+                return@launch
             }
-            _pageHighlights.value = cache
-            _occurrences.value = occ
-            val startIdx = when {
-                occ.isEmpty() -> 0
-                preferredPage != null -> {
-                    val first = occ.indexOfFirst { it.page == preferredPage }
-                    if (first < 0) {
-                        0
-                    } else {
-                        val onPage = cache[preferredPage]?.rects?.size ?: 1
-                        first + preferredOccurrence.coerceIn(0, onPage - 1)
-                    }
+            // Land on the first occurrence at/after the preferred page (wrapping),
+            // so a page that matched in FTS but has no drawable rects is skipped.
+            val startPage = preferredPage?.takeIf { it in pages } ?: pages.first()
+            val startIdx = pages.indexOf(startPage)
+            var landed = false
+            for (off in 0 until pages.size) {
+                val p = pages[(startIdx + off) % pages.size]
+                val n = rectsFor(p).rects.size
+                if (n > 0) {
+                    _activePage.value = p
+                    _activeRectIndexOnPage.value =
+                        if (p == startPage) preferredOccurrence.coerceIn(0, n - 1) else 0
+                    landed = true
+                    break
                 }
-                else -> 0
             }
-            setActiveOccurrence(startIdx)
+            if (!landed) {
+                // Pages matched but none yielded rects (e.g. all heavy text pages that
+                // OOM-skipped). Still position on the start page so search "works".
+                _activePage.value = startPage
+                _activeRectIndexOnPage.value = -1
+            }
+            recompute()
+            startCountPass()
         }
     }
 
     /**
-     * Build highlight rects for scanned pages from the OCR word boxes stored at index
-     * time. Boxes are normalised, so we scale them by each page's point size (from the
-     * open renderer) into the same coordinate space the text-layer path uses.
+     * Ensure rects for [page] are computed and cached, if [page] is a match page and
+     * not already done. Called when a match page is scrolled to, so its highlights
+     * paint even if the background count pass hasn't reached it yet.
      */
-    private suspend fun ocrHighlightsForPages(
-        docUri: String,
-        pages: List<Int>,
-        keyword: String,
-    ): Map<Int, PdfHighlighter.PageHighlights> {
-        if (pages.isEmpty()) return emptyMap()
-        val renderer = currentRenderer ?: return emptyMap()
-        val needle = keyword.trim().lowercase()
-        if (needle.isEmpty()) return emptyMap()
-        val rows = runCatching { pageDao.ocrWordBoxes(docUri, pages) }.getOrNull() ?: return emptyMap()
-        val out = LinkedHashMap<Int, PdfHighlighter.PageHighlights>()
-        for (row in rows) {
-            val matched = OcrWordBoxes.decode(row.wordBoxesJson)
-                .filter { it.text.lowercase().contains(needle) }
-            if (matched.isEmpty()) continue
-            val size = renderer.pageSize(row.pageNumber) ?: continue
-            val w = size.width
-            val h = size.height
-            if (w <= 0f || h <= 0f) continue
-            val rects = matched.map { RectF(it.left * w, it.top * h, it.right * w, it.bottom * h) }
-            out[row.pageNumber] = PdfHighlighter.PageHighlights(row.pageNumber, rects, w, h)
+    fun ensurePageHighlights(page: Int) {
+        if (page < 0 || page !in _matchPages.value) return
+        if (_pageHighlights.value.containsKey(page)) return
+        if (searchKeyword.length < 2) return
+        viewModelScope.launch(Dispatchers.IO) { rectsFor(page) }
+    }
+
+    /**
+     * Background gated pass: compute rects for every match page, one at a time, so the
+     * occurrence total settles. Each page goes through [rectsFor], which shares the
+     * single MuPDF render permit and catches per-page OOM — safe on huge files.
+     */
+    private fun startCountPass() {
+        countJob?.cancel()
+        countJob = viewModelScope.launch(Dispatchers.IO) {
+            for (p in _matchPages.value) {
+                if (!isActive) break
+                rectsFor(p)
+            }
         }
-        return out
     }
 
-    fun nextOccurrence() {
-        val n = _occurrences.value.size
-        if (n == 0) return
-        setActiveOccurrence((_activeOccurrence.value + 1) % n)
+    /**
+     * Return rects for [page], computing and caching on first request. Cache writes
+     * and the derived occurrence counts are guarded by [cacheMutex] so the count
+     * pass, navigation, and scroll-driven computes don't race.
+     */
+    private suspend fun rectsFor(page: Int): PdfHighlighter.PageHighlights {
+        _pageHighlights.value[page]?.let { return it }
+        val uri = searchUri ?: return PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f)
+        val keyword = searchKeyword
+        if (keyword.length < 2) return PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f)
+        val computed = computePageHighlights(uri, page, keyword, searchPassword)
+        return cacheMutex.withLock {
+            _pageHighlights.value[page] ?: run {
+                _pageHighlights.value = _pageHighlights.value + (page to computed)
+                recomputeCounts()
+                computed
+            }
+        }
     }
 
-    fun prevOccurrence() {
-        val n = _occurrences.value.size
-        if (n == 0) return
-        setActiveOccurrence((_activeOccurrence.value - 1 + n) % n)
+    /** OCR page → DB boxes (free); else text-layer page → lazy MuPDF rects. */
+    private suspend fun computePageHighlights(
+        uri: Uri,
+        page: Int,
+        keyword: String,
+        password: String?,
+    ): PdfHighlighter.PageHighlights {
+        ocrHighlightsForPage(page, keyword)?.let { return it }
+        return runCatching { pdfHighlighter.findOnPage(uri, page, keyword, password) }
+            .getOrElse { PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f) }
+    }
+
+    /**
+     * Highlight rects for a single scanned page from its stored OCR word boxes.
+     * Returns null when [page] is not an OCR page (caller falls back to text);
+     * returns a (possibly empty-rect) result when it is, so we never recompute it.
+     */
+    private suspend fun ocrHighlightsForPage(page: Int, keyword: String): PdfHighlighter.PageHighlights? {
+        val renderer = currentRenderer ?: return null
+        val needle = keyword.lowercase()
+        if (needle.isEmpty()) return null
+        val rows = runCatching { pageDao.ocrWordBoxes(searchDocUri, listOf(page)) }.getOrNull()
+        val row = rows?.firstOrNull() ?: return null
+        val size = renderer.pageSize(page) ?: return PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f)
+        val w = size.width
+        val h = size.height
+        if (w <= 0f || h <= 0f) return PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f)
+        val rects = OcrWordBoxes.decode(row.wordBoxesJson)
+            .filter { it.text.lowercase().contains(needle) }
+            .map { RectF(it.left * w, it.top * h, it.right * w, it.bottom * h) }
+        return PdfHighlighter.PageHighlights(page, rects, w, h)
+    }
+
+    fun nextOccurrence() = step(+1)
+
+    fun prevOccurrence() = step(-1)
+
+    /**
+     * Step one occurrence in [dir] (+1 next, -1 prev). Walks rects within the active
+     * page first, then advances to the adjacent match page that has rects (computing
+     * lazily, wrapping around), skipping match pages with no drawable rects.
+     */
+    private fun step(dir: Int) {
+        val pages = _matchPages.value
+        if (pages.isEmpty()) return
+        navJob?.cancel()
+        navJob = viewModelScope.launch(Dispatchers.Main.immediate) {
+            val page = _activePage.value
+            val curRects = if (page >= 0) rectsFor(page).rects.size else 0
+            val target = _activeRectIndexOnPage.value + dir
+            if (page >= 0 && target in 0 until curRects) {
+                _activeRectIndexOnPage.value = target
+                recompute()
+                return@launch
+            }
+            val base = pages.indexOf(page).coerceAtLeast(0)
+            for (off in 1..pages.size) {
+                val p = pages[((base + dir * off) % pages.size + pages.size) % pages.size]
+                val n = rectsFor(p).rects.size
+                if (n > 0) {
+                    _activePage.value = p
+                    _activeRectIndexOnPage.value = if (dir > 0) 0 else n - 1
+                    recompute()
+                    return@launch
+                }
+            }
+        }
     }
 
     fun clearSearch() = resetSearch()
 
-    fun resetHighlightSkipped() {
-        _highlightSkipped.value = false
+    /** Recompute the displayed ordinal/total from the rects cached so far. Total only
+     *  counts computed pages, so it grows as the count pass fills in. */
+    private fun recomputeCounts() {
+        val pages = _matchPages.value
+        val hl = _pageHighlights.value
+        var total = 0
+        for (p in pages) total += hl[p]?.rects?.size ?: 0
+        val active = _activePage.value
+        val rect = _activeRectIndexOnPage.value
+        val ordinal = if (active < 0 || rect < 0) {
+            0
+        } else {
+            var before = 0
+            for (p in pages) {
+                if (p == active) break
+                before += hl[p]?.rects?.size ?: 0
+            }
+            before + rect + 1
+        }
+        _occurrenceOrdinal.value = ordinal
+        _occurrenceTotal.value = maxOf(total, ordinal)
     }
 
-    private fun setActiveOccurrence(index: Int) {
-        val occ = _occurrences.value
-        if (occ.isEmpty()) {
-            _activeOccurrence.value = 0
-            _activePage.value = -1
-            _activeRectIndexOnPage.value = -1
-            return
-        }
-        val i = index.coerceIn(0, occ.size - 1)
-        _activeOccurrence.value = i
-        _activePage.value = occ[i].page
-        _activeRectIndexOnPage.value = occ[i].rectIndex
-    }
+    private suspend fun recompute() = cacheMutex.withLock { recomputeCounts() }
 
     private fun resetSearch() {
         searchJob?.cancel()
-        _occurrences.value = emptyList()
+        countJob?.cancel()
+        navJob?.cancel()
+        _matchPages.value = emptyList()
         _pageHighlights.value = emptyMap()
-        _activeOccurrence.value = 0
+        _occurrenceOrdinal.value = 0
+        _occurrenceTotal.value = 0
         _activePage.value = -1
         _activeRectIndexOnPage.value = -1
+        searchDocUri = ""
+        searchUri = null
+        searchKeyword = ""
+        searchPassword = null
     }
 
     // ── Scroll mode ───────────────────────────────────────────────────────────
@@ -310,17 +416,6 @@ class PdfViewerViewModel @Inject constructor(
     }
 
     suspend fun getLastPage(uri: String): Int? = safRepository.getLastPage(uri)
-
-    private fun canSafelyComputeHighlights(uri: Uri): Boolean {
-        val resolver = getApplication<Application>().contentResolver
-        val length = runCatching {
-            resolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-                val reported = afd.length
-                if (reported >= 0) reported else null
-            }
-        }.getOrNull()
-        return length?.let { it <= MAX_HIGHLIGHT_PDF_BYTES } ?: true
-    }
 }
 
 private const val OOM_MESSAGE =

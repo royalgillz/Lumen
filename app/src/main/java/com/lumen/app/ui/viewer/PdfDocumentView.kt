@@ -1,6 +1,7 @@
 package com.lumen.app.ui.viewer
 
 import android.animation.ValueAnimator
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -74,9 +75,33 @@ class PdfDocumentView @JvmOverloads constructor(
      *  preserve the user's zoom/scroll instead of snapping back to the initial page. */
     private var hasPositioned = false
 
+    /**
+     * Device-aware cache budget. Bitmap pixels live in the native heap (API 26+),
+     * which `largeHeap` does not bound, so a fixed ceiling is the bug pattern this
+     * whole effort is removing. Derive from [ActivityManager.getLargeMemoryClass]
+     * as a device-tier proxy (it governs Dalvik, not these native pixels, so it is
+     * a tier signal — not a hard bound) and clamp to a sane band.
+     */
+    private val cacheMaxBytes: Int = run {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val largeClassMb = am?.largeMemoryClass ?: 96
+        val quarterMb = (largeClassMb * 0.25f).toInt()
+        quarterMb.coerceIn(CACHE_FLOOR_MB, CACHE_CEIL_MB) * 1024 * 1024
+    }
+
+    /**
+     * Per-bitmap ceiling, derived from the cache budget so a single rendered page is
+     * always smaller than the cache. Otherwise, on a small-heap device whose budget
+     * floors at 24 MB, a 32 MB page bitmap would be evicted the instant it is
+     * inserted — the render→evict→repeat thrash this cap exists to prevent. Capped
+     * at 32 MB (≈ 8 MP ARGB_8888) on larger devices where the budget is generous.
+     */
+    private val maxBitmapBytes: Int =
+        (cacheMaxBytes * 0.6f).toInt().coerceAtMost(32 * 1024 * 1024)
+
     /** Per-(page, scaleBucket) bitmap cache. Sized in bytes. */
     private val bitmapCache: LruCache<CacheKey, Bitmap> =
-        object : LruCache<CacheKey, Bitmap>(CACHE_MAX_BYTES) {
+        object : LruCache<CacheKey, Bitmap>(cacheMaxBytes) {
             override fun sizeOf(key: CacheKey, value: Bitmap): Int = value.byteCount
             override fun entryRemoved(
                 evicted: Boolean,
@@ -337,13 +362,43 @@ class PdfDocumentView @JvmOverloads constructor(
         }
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        context.registerComponentCallbacks(memoryCallbacks)
+    }
+
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        runCatching { context.unregisterComponentCallbacks(memoryCallbacks) }
         flingJob?.let { removeCallbacks(it) }
         flingJob = null
         animator?.cancel()
         scope.cancel()
         bitmapCache.evictAll()
+    }
+
+    /**
+     * Release the standing bitmap cache under real memory pressure, turning the
+     * cache from an always-on allocation into one that collapses when the system
+     * asks — more responsive than a static budget guess. Moderate pressure halves
+     * it; critical pressure clears it.
+     */
+    private val memoryCallbacks = object : ComponentCallbacks2 {
+        override fun onTrimMemory(level: Int) {
+            when {
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
+                    bitmapCache.evictAll()
+                    invalidate()
+                }
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> {
+                    bitmapCache.trimToSize(bitmapCache.maxSize() / 2)
+                }
+            }
+        }
+
+        @Deprecated("Required by ComponentCallbacks")
+        override fun onConfigurationChanged(newConfig: android.content.res.Configuration) { /* no-op */ }
+        override fun onLowMemory() { bitmapCache.evictAll() }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -372,6 +427,11 @@ class PdfDocumentView @JvmOverloads constructor(
         // Preload a small neighbourhood for smooth scroll.
         val firstPrefetch = max(0, visible.first - 1)
         val lastPrefetch = min(pageCount - 1, visible.last + 1)
+
+        // With a single global render permit, a superseded render (wrong zoom bucket
+        // or scrolled far off-screen) would otherwise hold up the renders the user is
+        // actually waiting on. Cancel them so they release / never acquire the permit.
+        cancelStaleRenders(firstPrefetch, lastPrefetch, scaleBucket)
 
         for (i in firstPrefetch..lastPrefetch) {
             val pageSize = pageSizes[i]
@@ -844,6 +904,29 @@ class PdfDocumentView @JvmOverloads constructor(
     }
 
     /**
+     * Cancel in-flight renders the current frame no longer needs: any whose page is
+     * outside [firstPage]..[lastPage], plus visible-range pages rendered at a stale
+     * [currentBucket] (superseded by a zoom change). A render already inside its
+     * native toPixmap can't be interrupted (MuPDF's toPixmap takes no abort cookie),
+     * but cancelling frees coroutines still queued on the permit and discards stale
+     * results, which is what keeps permit=1 responsive.
+     */
+    private fun cancelStaleRenders(firstPage: Int, lastPage: Int, currentBucket: Int) {
+        if (inFlightRenders.isEmpty()) return
+        val it = inFlightRenders.entries.iterator()
+        while (it.hasNext()) {
+            val (key, job) = it.next()
+            val offscreen = key.pageIndex < firstPage || key.pageIndex > lastPage
+            // Off-screen prefetch renders use bucket 0; don't treat those as stale.
+            val staleBucket = key.scaleBucket != 0 && key.scaleBucket != currentBucket
+            if (offscreen || staleBucket) {
+                job.cancel()
+                it.remove()
+            }
+        }
+    }
+
+    /**
      * Clamp a desired render scale so a single page bitmap never exceeds
      * [MAX_BITMAP_BYTES] or [MAX_DIM] on either axis. Without this, high zoom
      * buckets render multi-hundred-MB bitmaps that either OOM or — being larger
@@ -860,7 +943,7 @@ class PdfDocumentView @JvmOverloads constructor(
         var s = desired
         val maxByDim = min(MAX_DIM / wPt, MAX_DIM / hPt)
         if (s > maxByDim) s = maxByDim
-        val maxByBytes = sqrt(MAX_BITMAP_BYTES.toDouble() / (4.0 * wPt * hPt)).toFloat()
+        val maxByBytes = sqrt(maxBitmapBytes.toDouble() / (4.0 * wPt * hPt)).toFloat()
         if (s > maxByBytes) s = maxByBytes
         return max(s, 0.1f)
     }
@@ -909,15 +992,10 @@ class PdfDocumentView @JvmOverloads constructor(
         /** 1pt vertical gap between pages (vertical mode) or horizontal (horizontal mode). */
         private const val GAP_PTS = 6f
 
-        /** ~96 MB upper bound on cached bitmaps; sized by byteCount, not entry count.
-         *  On API 26+ bitmap pixels live in the native heap, so this does not count
-         *  against the Dalvik heap budget. */
-        private const val CACHE_MAX_BYTES = 96 * 1024 * 1024
-
-        /** Per-bitmap ceiling. Must stay well under [CACHE_MAX_BYTES] so a freshly
-         *  rendered page is never larger than the cache (which would evict it on
-         *  insertion). 32 MB ≈ an 8-megapixel ARGB_8888 bitmap. */
-        private const val MAX_BITMAP_BYTES = 32 * 1024 * 1024
+        /** Device-aware cache band, in MB (see [cacheMaxBytes]). Floor keeps a
+         *  small-heap device usable; ceiling caps the standing native allocation. */
+        private const val CACHE_FLOOR_MB = 24
+        private const val CACHE_CEIL_MB = 96
 
         /** Hard cap on either bitmap dimension. */
         private const val MAX_DIM = 4096f

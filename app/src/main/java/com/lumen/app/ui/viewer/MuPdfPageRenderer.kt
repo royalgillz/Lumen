@@ -11,6 +11,7 @@ import com.artifex.mupdf.fitz.Link
 import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.Page
 import com.artifex.mupdf.fitz.Rect
+import com.lumen.app.data.pdf.MuPdfGate
 import com.lumen.app.data.pdf.PfdSeekableStream
 import com.lumen.app.data.pdf.pixmapToBitmap
 import kotlinx.coroutines.Dispatchers
@@ -70,15 +71,18 @@ class MuPdfPageRenderer private constructor(
     suspend fun renderPage(index: Int, scale: Float): Bitmap? {
         if (index !in 0 until pageCount) return null
         if (scale <= 0f) return null
-        return withDocLock {
+        // Gate the native render so only one rasterisation runs app-wide at a time.
+        return MuPdfGate.withRenderPermit {
+          withDocLock {
             val page = runCatching { doc.loadPage(index) }.getOrNull() ?: return@withDocLock null
             try {
                 val matrix = Matrix(scale, scale)
-                // Render over an opaque white backdrop (alpha = false) so soft-masked
-                // images composite correctly; a transparent backdrop makes some icons
-                // collapse into solid colour blocks.
+                // Render WITH alpha so MuPDF preserves soft-mask transparency on
+                // images; pixmapToBitmap then composites over white. Rendering
+                // without alpha makes MuPDF flatten soft-masked icons onto their own
+                // backdrop colour, which is the "solid teal block" symptom.
                 val pixmap = runCatching {
-                    page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ false)
+                    page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
                 }.getOrNull() ?: return@withDocLock null
                 try {
                     pixmapToBitmap(pixmap)
@@ -90,6 +94,7 @@ class MuPdfPageRenderer private constructor(
             } finally {
                 page.destroy()
             }
+          }
         }
     }
 

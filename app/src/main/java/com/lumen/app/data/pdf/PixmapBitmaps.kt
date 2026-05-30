@@ -7,11 +7,11 @@ import java.nio.ByteBuffer
 /**
  * Convert a MuPDF [Pixmap] to an ARGB_8888 [Bitmap].
  *
- * Pages are rendered over an opaque white backdrop (`alpha = false`) so PDF
- * transparency and soft masks composite the way reference viewers do — rendering
- * onto a transparent backdrop makes some soft-masked icons collapse into solid
- * colour blocks. That produces a 3-component (RGB) pixmap, which this expands to
- * RGBA for the bitmap. A 4-component pixmap is copied straight through.
+ * Pages are rendered WITH alpha (`alpha = true`) so MuPDF keeps soft-mask
+ * transparency on images instead of flattening them onto their own backdrop
+ * colour (the "solid teal block" symptom). This converter then composites the
+ * resulting RGBA over opaque white, the way reference viewers do. A 3-component
+ * (RGB) pixmap, if ever produced, is treated as already-opaque.
  *
  * Returns null on any size/format mismatch (the bitmap is recycled first).
  */
@@ -35,7 +35,28 @@ fun pixmapToBitmap(pixmap: Pixmap): Bitmap? {
             if (samples.size < expected) {
                 bmp.recycle(); null
             } else {
-                bmp.copyPixelsFromBuffer(ByteBuffer.wrap(samples, 0, expected))
+                // Composite over opaque white rather than copying the RGBA straight
+                // through: a transparent pixmap region would otherwise let the dark
+                // canvas show through (the "green/teal block" symptom on soft-masked
+                // content). Forcing white matches reference viewers.
+                val out = ByteArray(expected)
+                var i = 0
+                while (i < expected) {
+                    val a = samples[i + 3].toInt() and 0xFF
+                    if (a == 255) {
+                        out[i] = samples[i]
+                        out[i + 1] = samples[i + 1]
+                        out[i + 2] = samples[i + 2]
+                    } else {
+                        val inv = 255 - a
+                        out[i] = (((samples[i].toInt() and 0xFF) * a + 255 * inv) / 255).toByte()
+                        out[i + 1] = (((samples[i + 1].toInt() and 0xFF) * a + 255 * inv) / 255).toByte()
+                        out[i + 2] = (((samples[i + 2].toInt() and 0xFF) * a + 255 * inv) / 255).toByte()
+                    }
+                    out[i + 3] = 0xFF.toByte()
+                    i += 4
+                }
+                bmp.copyPixelsFromBuffer(ByteBuffer.wrap(out))
                 bmp
             }
         }

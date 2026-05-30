@@ -27,7 +27,7 @@ class PdfPageRenderer @Inject constructor(
         withContext(Dispatchers.IO) {
             withMuPdfDocument(context, uri) { doc ->
                 if (pageIndex !in 0 until doc.countPages()) return@withMuPdfDocument null
-                renderPageInternal(doc, pageIndex, dpi)
+                MuPdfGate.withRenderPermit { renderPageInternal(doc, pageIndex, dpi) }
             }
         }
 
@@ -48,7 +48,11 @@ class PdfPageRenderer @Inject constructor(
                 val count = doc.countPages()
                 for (pageIndex in pageIndices) {
                     if (pageIndex !in 0 until count) continue
-                    val bitmap = renderPageInternal(doc, pageIndex, dpi) ?: continue
+                    // Acquire per page (not around the whole session) so a long OCR
+                    // run can't hold the permit and starve the viewer between pages.
+                    val bitmap = MuPdfGate.withRenderPermit {
+                        renderPageInternal(doc, pageIndex, dpi)
+                    } ?: continue
                     try {
                         onPage(pageIndex, bitmap)
                     } finally {
@@ -69,7 +73,7 @@ class PdfPageRenderer @Inject constructor(
             val scale = dpi / 72f
             val matrix = Matrix(scale, scale)
             val pixmap = try {
-                page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ false)
+                page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
             } catch (_: OutOfMemoryError) {
                 return null
             } catch (_: Throwable) {

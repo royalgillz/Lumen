@@ -28,7 +28,7 @@ class PdfHighlighter @Inject constructor(
      * and already account for the page's rotation (MuPDF reports bboxes in the
      * page's rendered coordinate space).
      */
-    fun findOnPage(
+    suspend fun findOnPage(
         uri: Uri,
         pageIndex: Int,
         keyword: String,
@@ -40,30 +40,12 @@ class PdfHighlighter @Inject constructor(
         } ?: empty(pageIndex)
     }
 
-    /**
-     * Batch variant: compute highlight rects for every page in [pages] while opening
-     * the document only once. This is the single source of truth for in-document
-     * search — the enumerated rects are exactly what gets navigated and drawn, so an
-     * occurrence index can never point at a rect that doesn't exist.
-     */
-    fun findOnPages(
-        uri: Uri,
-        pages: List<Int>,
-        keyword: String,
-        password: String? = null,
-    ): List<PageHighlights> {
-        if (keyword.isBlank() || pages.isEmpty()) return emptyList()
-        return withMuPdfDocument(context, uri, password) { doc ->
-            val count = doc.countPages()
-            pages.asSequence()
-                .filter { it in 0 until count }
-                .distinct()
-                .map { extractForPage(doc, it, keyword) }
-                .toList()
-        } ?: emptyList()
-    }
+    // Gated: toStructuredText allocates native memory proportional to page complexity,
+    // so it must share the single render permit with bitmap rasterisation.
+    private suspend fun extractForPage(doc: Document, pageIndex: Int, keyword: String): PageHighlights =
+        MuPdfGate.withRenderPermit { extractForPageLocked(doc, pageIndex, keyword) }
 
-    private fun extractForPage(doc: Document, pageIndex: Int, keyword: String): PageHighlights {
+    private fun extractForPageLocked(doc: Document, pageIndex: Int, keyword: String): PageHighlights {
         if (pageIndex !in 0 until doc.countPages()) return empty(pageIndex)
         val page = runCatching { doc.loadPage(pageIndex) }.getOrNull() ?: return empty(pageIndex)
         return try {

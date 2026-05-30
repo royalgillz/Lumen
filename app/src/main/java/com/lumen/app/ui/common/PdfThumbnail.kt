@@ -21,10 +21,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.artifex.mupdf.fitz.ColorSpace
 import com.artifex.mupdf.fitz.Matrix
+import com.lumen.app.data.pdf.MuPdfGate
+import com.lumen.app.data.pdf.pixmapToBitmap
 import com.lumen.app.data.pdf.withMuPdfDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
 
 @Composable
 fun PdfThumbnail(
@@ -50,25 +51,18 @@ fun PdfThumbnail(
                     val targetPx = 96f
                     val scale = (targetPx / pageWidthPts).coerceAtLeast(0.01f)
                     val matrix = Matrix(scale, scale)
-                    val pixmap = runCatching {
-                        page.toPixmap(matrix, ColorSpace.DeviceRGB, true)
-                    }.getOrNull() ?: return@withMuPdfDocument null
-                    try {
-                        val w = pixmap.width
-                        val h = pixmap.height
-                        if (w <= 0 || h <= 0) return@withMuPdfDocument null
-                        val samples = pixmap.samples ?: return@withMuPdfDocument null
-                        val expected = w * h * 4
-                        if (samples.size < expected) return@withMuPdfDocument null
-                        val bmp = try {
-                            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                        } catch (_: OutOfMemoryError) {
-                            return@withMuPdfDocument null
+                    // Share the global render permit; render WITH alpha and let
+                    // pixmapToBitmap composite over white so soft-masked icons don't
+                    // collapse into solid colour blocks.
+                    MuPdfGate.withRenderPermit {
+                        val pixmap = runCatching {
+                            page.toPixmap(matrix, ColorSpace.DeviceRGB, true)
+                        }.getOrNull() ?: return@withRenderPermit null
+                        try {
+                            pixmapToBitmap(pixmap)
+                        } finally {
+                            runCatching { pixmap.destroy() }
                         }
-                        bmp.copyPixelsFromBuffer(ByteBuffer.wrap(samples, 0, expected))
-                        bmp
-                    } finally {
-                        runCatching { pixmap.destroy() }
                     }
                 } finally {
                     runCatching { page.destroy() }
