@@ -10,7 +10,6 @@ import com.artifex.mupdf.fitz.Page
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -70,26 +69,14 @@ class PdfPageRenderer @Inject constructor(
             val scale = dpi / 72f
             val matrix = Matrix(scale, scale)
             val pixmap = try {
-                page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
+                page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ false)
             } catch (_: OutOfMemoryError) {
                 return null
             } catch (_: Throwable) {
                 return null
             } ?: return null
             try {
-                val w = pixmap.width
-                val h = pixmap.height
-                if (w <= 0 || h <= 0) return null
-                val samples = pixmap.samples ?: return null
-                val expected = w * h * 4
-                if (samples.size < expected) return null
-                val bmp = try {
-                    Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                } catch (_: OutOfMemoryError) {
-                    return null
-                }
-                bmp.copyPixelsFromBuffer(ByteBuffer.wrap(samples, 0, expected))
-                bmp
+                pixmapToBitmap(pixmap)
             } finally {
                 runCatching { pixmap.destroy() }
             }

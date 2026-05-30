@@ -57,6 +57,7 @@ class IndexWorker @AssistedInject constructor(
         val folderUri = inputData.getString(KEY_FOLDER_URI)
             ?.let { Uri.parse(it) }
             ?: return@withContext Result.failure()
+        val force = inputData.getBoolean(KEY_FORCE, false)
 
         setForeground(buildForegroundInfo("Scanning for PDFs…"))
 
@@ -77,7 +78,7 @@ class IndexWorker @AssistedInject constructor(
                 else -> 10 * 60 * 1000L
             }
             val completed = try {
-                withTimeoutOrNull(timeoutMs) { indexPdf(pdf, folderUri) } != null
+                withTimeoutOrNull(timeoutMs) { indexPdf(pdf, folderUri, force) } != null
             } catch (_: Exception) {
                 false
             }
@@ -91,11 +92,12 @@ class IndexWorker @AssistedInject constructor(
         Result.success()
     }
 
-    private suspend fun indexPdf(pdf: PdfFile, folderUri: Uri) {
+    private suspend fun indexPdf(pdf: PdfFile, folderUri: Uri, force: Boolean) {
         val uriStr = pdf.uri.toString()
 
         val existing = documentDao.getByUri(uriStr)
-        if (existing != null
+        if (!force
+            && existing != null
             && existing.status == DocumentEntity.STATUS_INDEXED
             && existing.lastModified == pdf.lastModified) {
             return
@@ -222,6 +224,7 @@ class IndexWorker @AssistedInject constructor(
         const val KEY_FOLDER_URI = "folder_uri"
         const val KEY_PROGRESS = "progress"
         const val KEY_TOTAL = "total"
+        const val KEY_FORCE = "force"
         private const val CHANNEL_ID = "lumen_indexing"
         private const val NOTIFICATION_ID = 1001
 
@@ -230,9 +233,14 @@ class IndexWorker @AssistedInject constructor(
         // ML Kit result must have at least this many chars to skip Tesseract fallback
         private const val MIN_OCR_CHARS = 5
 
-        fun buildRequest(folderUri: Uri): OneTimeWorkRequest =
+        fun buildRequest(folderUri: Uri, force: Boolean = false): OneTimeWorkRequest =
             OneTimeWorkRequestBuilder<IndexWorker>()
-                .setInputData(workDataOf(KEY_FOLDER_URI to folderUri.toString()))
+                .setInputData(
+                    workDataOf(
+                        KEY_FOLDER_URI to folderUri.toString(),
+                        KEY_FORCE to force,
+                    )
+                )
                 .addTag("index")
                 .build()
     }

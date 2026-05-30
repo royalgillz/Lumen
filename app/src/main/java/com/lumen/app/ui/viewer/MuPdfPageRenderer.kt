@@ -12,11 +12,11 @@ import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.Page
 import com.artifex.mupdf.fitz.Rect
 import com.lumen.app.data.pdf.PfdSeekableStream
+import com.lumen.app.data.pdf.pixmapToBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
 
 /**
  * Long-lived MuPDF session for the viewer.
@@ -74,23 +74,14 @@ class MuPdfPageRenderer private constructor(
             val page = runCatching { doc.loadPage(index) }.getOrNull() ?: return@withDocLock null
             try {
                 val matrix = Matrix(scale, scale)
+                // Render over an opaque white backdrop (alpha = false) so soft-masked
+                // images composite correctly; a transparent backdrop makes some icons
+                // collapse into solid colour blocks.
                 val pixmap = runCatching {
-                    page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
+                    page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ false)
                 }.getOrNull() ?: return@withDocLock null
                 try {
-                    val w = pixmap.width
-                    val h = pixmap.height
-                    if (w <= 0 || h <= 0) return@withDocLock null
-                    val samples = pixmap.samples ?: return@withDocLock null
-                    val expected = w * h * 4
-                    if (samples.size < expected) return@withDocLock null
-                    val bmp = try {
-                        Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                    } catch (_: OutOfMemoryError) {
-                        return@withDocLock null
-                    }
-                    bmp.copyPixelsFromBuffer(ByteBuffer.wrap(samples, 0, expected))
-                    bmp
+                    pixmapToBitmap(pixmap)
                 } finally {
                     pixmap.destroy()
                 }
