@@ -85,7 +85,9 @@ class LibraryViewModel @Inject constructor(
         workManager.enqueueUniqueWork(
             "index_$treeUri",
             ExistingWorkPolicy.REPLACE,
-            IndexWorker.buildRequest(treeUri),
+            // force = true so re-index actually re-processes already-indexed docs
+            // (e.g. to backfill OCR highlight boxes), not just new/changed ones.
+            IndexWorker.buildRequest(treeUri, force = true),
         )
     }
 
