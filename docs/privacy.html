@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Lumen</title>
+<meta name="description" content="Lumen is a privacy-first, fully offline PDF search app. It collects no data and has no internet permission.">
+<style>
+  :root {
+    --forest: #2A4D3A;
+    --terracotta: #C76B47;
+    --warm-white: #FAFAF7;
+    --ink: #1A1C1A;
+    --muted: #414941;
+    --surface: #F0F0EC;
+    --border: #E3E3DC;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--warm-white);
+    color: var(--ink);
+    line-height: 1.65;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 48px 24px 96px; }
+  header { border-bottom: 3px solid var(--forest); padding-bottom: 24px; margin-bottom: 32px; }
+  h1 { color: var(--forest); font-size: 2rem; margin: 0 0 8px; }
+  .sub { color: var(--muted); font-size: .95rem; margin: 0; }
+  h2 { color: var(--forest); font-size: 1.25rem; margin-top: 40px; }
+  .lead { font-size: 1.1rem; color: var(--ink); }
+  .banner {
+    background: var(--surface);
+    border-left: 4px solid var(--terracotta);
+    padding: 16px 20px;
+    border-radius: 6px;
+    margin: 28px 0;
+    font-weight: 600;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: .95rem; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--forest); }
+  code {
+    background: var(--surface);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: .9em;
+  }
+  .never { color: var(--terracotta); font-weight: 700; font-size: 1.15rem; }
+  footer { margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; }
+  a { color: var(--terracotta); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Privacy Policy — Lumen</h1>
+    <p class="sub">Applies to Lumen v1.0 · Last updated: May 2026</p>
+  </header>
+
+  <p class="lead">Lumen collects no data. Here is exactly what happens on your device.</p>
+
+  <div class="banner">Lumen has no <code>INTERNET</code> permission in its Android Manifest. It physically cannot make network requests.</div>
+
+  <h2>What Lumen does</h2>
+  <ul>
+    <li>Your PDF files are read in place. They are never copied, uploaded, or moved.</li>
+    <li>A search index (SQLite database) is stored in the app's private storage on your device.</li>
+    <li>No analytics events are recorded.</li>
+    <li>No crash reports are sent anywhere.</li>
+    <li>The app has no INTERNET permission, so it cannot make network requests.</li>
+  </ul>
+
+  <h2>Permissions used</h2>
+  <table>
+    <thead><tr><th>Permission</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><code>READ_EXTERNAL_STORAGE</code> (Android 8–12 only)</td><td>To read PDF files from the folders you select</td></tr>
+      <tr><td><code>FOREGROUND_SERVICE</code></td><td>To run indexing in the background with a visible notification</td></tr>
+      <tr><td><code>RECEIVE_BOOT_COMPLETED</code></td><td>To restart background sync after device reboot</td></tr>
+      <tr><td><code>WAKE_LOCK</code></td><td>To keep the processor awake during indexing</td></tr>
+    </tbody>
+  </table>
+  <p>No other permissions are requested or used.</p>
+
+  <h2>Data on your device</h2>
+  <ul>
+    <li><strong>Search index (SQLite):</strong> stored in the app's private storage. Contains extracted text lines from your PDFs. Deleted automatically when you uninstall the app.</li>
+    <li><strong>Folder paths:</strong> the SAF URIs of folders you add to Lumen, stored in app preferences.</li>
+    <li><strong>Reading progress:</strong> the last page you viewed per document, stored locally.</li>
+  </ul>
+
+  <h2>Data sent off your device</h2>
+  <p class="never">Nothing. Ever.</p>
+
+  <h2>Third-party SDKs</h2>
+  <ul>
+    <li><strong>ML Kit Text Recognition (Google):</strong> runs 100% on-device. No data is sent to Google servers.</li>
+    <li>No analytics SDKs, no ad SDKs, no crash reporting SDKs.</li>
+  </ul>
+
+  <h2>Deleting your data</h2>
+  <p>Delete the search index at any time from <strong>Settings → Delete Index</strong>. Uninstalling the app deletes the index and all app data automatically.</p>
+
+  <h2>Contact</h2>
+  <p>If you have questions about this policy, open an issue on the <a href="https://github.com/royalgillz/Lumen">GitHub repository</a>.</p>
+
+  <footer>
+    Lumen — privacy-first, fully offline PDF search. Source code:
+    <a href="https://github.com/royalgillz/Lumen">github.com/royalgillz/Lumen</a>
+  </footer>
+</div>
+</body>
+</html>
