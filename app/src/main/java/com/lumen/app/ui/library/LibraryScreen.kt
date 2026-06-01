@@ -72,7 +72,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
-import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 import java.util.concurrent.TimeUnit
@@ -165,12 +165,12 @@ fun LibraryScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(AmberAccent.copy(alpha = 0.15f))
+                        .background(Terracotta.copy(alpha = 0.15f))
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Icon(Icons.Default.Warning, contentDescription = null, tint = AmberAccent, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Terracotta, modifier = Modifier.size(18.dp))
                     Text(
                         text = "${lostPermissionFolders.size} folder${if (lostPermissionFolders.size > 1) "s" else ""} " +
                             "lost access, remove and re-add using + Add Folder.",
@@ -425,7 +425,7 @@ private fun StatItem(count: Int, label: String, useAccent: Boolean = false) {
             text = count.toString(),
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
-            color = if (useAccent) AmberAccent else MaterialTheme.colorScheme.onSurface,
+            color = if (useAccent) Terracotta else MaterialTheme.colorScheme.onSurface,
         )
         Text(text = label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -580,7 +580,7 @@ private fun FolderRow(
             Icon(
                 if (hasLostPermission) Icons.Default.Warning else Icons.Default.FolderOpen,
                 contentDescription = null,
-                tint = if (hasLostPermission) AmberAccent else MaterialTheme.colorScheme.primary,
+                tint = if (hasLostPermission) Terracotta else MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(24.dp),
             )
             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -594,7 +594,7 @@ private fun FolderRow(
                     Text(
                         text = "Permission lost, remove and re-add",
                         style = MaterialTheme.typography.labelSmall,
-                        color = AmberAccent,
+                        color = Terracotta,
                     )
                 }
             }
@@ -667,7 +667,7 @@ private fun DocumentGridCard(
     val statusColor = when (doc.status) {
         DocumentEntity.STATUS_INDEXED -> MaterialTheme.colorScheme.primary
         DocumentEntity.STATUS_ERROR -> MaterialTheme.colorScheme.error
-        DocumentEntity.STATUS_ENCRYPTED -> AmberAccent
+        DocumentEntity.STATUS_ENCRYPTED -> Terracotta
         else -> MaterialTheme.colorScheme.outline
     }
     Surface(

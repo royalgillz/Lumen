@@ -36,7 +36,7 @@ import com.lumen.app.ui.icons.SearchTabIcon
 import com.lumen.app.ui.search.SearchScreen
 import com.lumen.app.ui.settings.SettingsScreen
 import androidx.compose.material3.MaterialTheme
-import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.theme.Terracotta
 import com.lumen.app.ui.viewer.PdfViewerScreen
 
 sealed class Screen(val route: String) {
@@ -123,9 +123,9 @@ fun LumenNavGraph(
                             icon = { tab.icon(selected) },
                             label = { Text(tab.label) },
                             colors = NavigationBarItemDefaults.colors(
-                                indicatorColor = AmberAccent.copy(alpha = 0.18f),
+                                indicatorColor = Terracotta.copy(alpha = 0.18f),
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = AmberAccent,
+                                selectedTextColor = Terracotta,
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             ),

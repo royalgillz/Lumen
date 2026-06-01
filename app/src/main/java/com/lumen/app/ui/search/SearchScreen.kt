@@ -100,6 +100,7 @@ import com.lumen.app.domain.model.SortOrder
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.icons.LumenBrandIcon
 import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.theme.Terracotta
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -306,7 +307,7 @@ private fun SearchHeader(
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .border(
                         width = if (activeFilterCount > 0) 1.dp else 0.dp,
-                        color = if (activeFilterCount > 0) AmberAccent.copy(alpha = 0.55f) else Color.Transparent,
+                        color = if (activeFilterCount > 0) Terracotta.copy(alpha = 0.55f) else Color.Transparent,
                         shape = RoundedCornerShape(12.dp),
                     )
                     .clickable(onClick = onFilterClick),
@@ -315,7 +316,7 @@ private fun SearchHeader(
                 Icon(
                     Icons.Default.FilterList,
                     contentDescription = "Filters",
-                    tint = if (activeFilterCount > 0) AmberAccent
+                    tint = if (activeFilterCount > 0) Terracotta
                            else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
@@ -323,7 +324,7 @@ private fun SearchHeader(
                     Box(
                         modifier = Modifier
                             .size(14.dp)
-                            .background(AmberAccent, CircleShape)
+                            .background(Terracotta, CircleShape)
                             .align(Alignment.TopEnd)
                             .padding(end = 2.dp, top = 2.dp),
                         contentAlignment = Alignment.Center,
@@ -545,10 +546,10 @@ fun ResultRow(
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.SemiBold,
-                            color = AmberAccent,
+                            color = Terracotta,
                             modifier = Modifier
                                 .padding(start = 8.dp)
-                                .background(AmberAccent.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+                                .background(Terracotta.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                         )
                     }

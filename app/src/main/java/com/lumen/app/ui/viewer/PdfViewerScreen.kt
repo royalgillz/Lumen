@@ -95,7 +95,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
-import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.delay
 
 @Composable
@@ -546,7 +546,7 @@ fun PdfViewerScreen(
                             Icon(
                                 Icons.Default.Search,
                                 contentDescription = "Search in document",
-                                tint = if (isViewerSearchActive) AmberAccent else MaterialTheme.colorScheme.onSurface,
+                                tint = if (isViewerSearchActive) Terracotta else MaterialTheme.colorScheme.onSurface,
                             )
                         }
                         Box {
@@ -587,7 +587,7 @@ fun PdfViewerScreen(
                                         Icon(
                                             Icons.Default.BrightnessMedium,
                                             contentDescription = null,
-                                            tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurface,
+                                            tint = if (showBrightnessSlider) Terracotta else MaterialTheme.colorScheme.onSurface,
                                         )
                                     },
                                     onClick = {
@@ -725,7 +725,7 @@ fun PdfViewerScreen(
                                     controlsTouchTick++
                                 },
                                 modifier = Modifier.weight(1f),
-                                colors = SliderDefaults.colors(thumbColor = AmberAccent, activeTrackColor = AmberAccent),
+                                colors = SliderDefaults.colors(thumbColor = Terracotta, activeTrackColor = Terracotta),
                             )
                             Icon(
                                 Icons.Default.BrightnessHigh,
