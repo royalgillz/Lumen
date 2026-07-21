@@ -5,7 +5,8 @@
 # ── Room ──────────────────────────────────────────────────────────────────────
 # Entities are accessed via reflection by Room's generated code
 -keep class com.lumen.app.data.db.entity.** { *; }
--keep class com.lumen.app.data.db.dao.SearchResultRow { *; }
+-keep class com.lumen.app.data.db.dao.PageSearchRow { *; }
+-keep class com.lumen.app.data.db.dao.FilenameSearchRow { *; }
 
 # ── Hilt ──────────────────────────────────────────────────────────────────────
 -keep class dagger.hilt.** { *; }
@@ -20,9 +21,9 @@
 -keep class * extends androidx.work.ListenableWorker { *; }
 -keep class com.lumen.app.worker.** { *; }
 
-# ── PdfBox-Android ────────────────────────────────────────────────────────────
--keep class com.tom_roush.pdfbox.** { *; }
--dontwarn com.tom_roush.pdfbox.**
+# ── PdfBox-Android (pdfbox + fontbox + harmony awt shims, all reflection-heavy) ─
+-keep class com.tom_roush.** { *; }
+-dontwarn com.tom_roush.**
 
 # ── ML Kit ────────────────────────────────────────────────────────────────────
 -keep class com.google.mlkit.** { *; }
