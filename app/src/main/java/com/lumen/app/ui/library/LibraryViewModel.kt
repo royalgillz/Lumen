@@ -80,6 +80,11 @@ class LibraryViewModel @Inject constructor(
     private val _selectedDocOcrPages = MutableStateFlow(0)
     val selectedDocOcrPages: StateFlow<Int> = _selectedDocOcrPages
 
+    /** docUri → bookmark count, driving the Library's bookmarked filter + badges. */
+    val bookmarkCounts: StateFlow<Map<String, Int>> = bookmarkDao.observeCountsByDocument()
+        .map { rows -> rows.associate { it.docUri to it.count } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val selectedDocBookmarks: StateFlow<List<BookmarkEntity>> = selectedDocument
         .flatMapLatest { doc ->

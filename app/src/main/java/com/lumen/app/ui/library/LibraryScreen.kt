@@ -32,6 +32,8 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.PictureAsPdf
@@ -104,10 +106,12 @@ fun LibraryScreen(
     val selectedDocument by viewModel.selectedDocument.collectAsState()
     val selectedDocOcrPages by viewModel.selectedDocOcrPages.collectAsState()
     val selectedDocBookmarks by viewModel.selectedDocBookmarks.collectAsState()
+    val bookmarkCounts by viewModel.bookmarkCounts.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var gridMode by rememberSaveable { mutableStateOf(true) }
+    var bookmarkedOnly by rememberSaveable { mutableStateOf(false) }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -254,6 +258,11 @@ fun LibraryScreen(
                                 )
                             }
                         }
+                        val visibleDocuments = if (bookmarkedOnly) {
+                            documents.filter { (bookmarkCounts[it.uri] ?: 0) > 0 }
+                        } else {
+                            documents
+                        }
                         item {
                             Row(
                                 modifier = Modifier
@@ -263,22 +272,54 @@ fun LibraryScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    text = "Documents (${documents.size})",
+                                    text = if (bookmarkedOnly) {
+                                        "Bookmarked (${visibleDocuments.size})"
+                                    } else {
+                                        "Documents (${visibleDocuments.size})"
+                                    },
                                     style = MaterialTheme.typography.labelLarge,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
-                                IconButton(onClick = { gridMode = !gridMode }) {
-                                    Icon(
-                                        imageVector = if (gridMode) Icons.Default.ViewAgenda else Icons.Default.GridView,
-                                        contentDescription = if (gridMode) "Switch to list view" else "Switch to grid view",
-                                    )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { bookmarkedOnly = !bookmarkedOnly }) {
+                                        Icon(
+                                            imageVector = if (bookmarkedOnly) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                            contentDescription = if (bookmarkedOnly) {
+                                                "Show all documents"
+                                            } else {
+                                                "Show only bookmarked documents"
+                                            },
+                                            tint = if (bookmarkedOnly) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                        )
+                                    }
+                                    IconButton(onClick = { gridMode = !gridMode }) {
+                                        Icon(
+                                            imageVector = if (gridMode) Icons.Default.ViewAgenda else Icons.Default.GridView,
+                                            contentDescription = if (gridMode) "Switch to list view" else "Switch to grid view",
+                                        )
+                                    }
                                 }
                             }
                         }
+                        if (bookmarkedOnly && visibleDocuments.isEmpty()) {
+                            item {
+                                Text(
+                                    "No bookmarked documents yet. Open a PDF and tap the bookmark icon in the top bar.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                )
+                            }
+                        }
                         if (!gridMode) {
-                            items(documents, key = { it.id }) { doc ->
+                            items(visibleDocuments, key = { it.id }) { doc ->
                                 DocumentRow(
                                     doc = doc,
+                                    bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
                                     onRetry = if (doc.status == DocumentEntity.STATUS_ERROR) {
                                         { viewModel.retryDocument(doc) }
                                     } else null,
@@ -286,7 +327,7 @@ fun LibraryScreen(
                                 )
                             }
                         } else {
-                            items(documents.chunked(2), key = { it.first().id }) { chunk ->
+                            items(visibleDocuments.chunked(2), key = { it.first().id }) { chunk ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -296,6 +337,7 @@ fun LibraryScreen(
                                     chunk.forEach { doc ->
                                         DocumentGridCard(
                                             doc = doc,
+                                            bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
                                             modifier = Modifier.weight(1f),
                                             onTap = { viewModel.showDocumentDetail(doc) },
                                         )
@@ -644,7 +686,12 @@ private fun FolderRow(
 }
 
 @Composable
-private fun DocumentRow(doc: DocumentEntity, onRetry: (() -> Unit)?, onTap: () -> Unit) {
+private fun DocumentRow(
+    doc: DocumentEntity,
+    bookmarkCount: Int,
+    onRetry: (() -> Unit)?,
+    onTap: () -> Unit,
+) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -677,6 +724,25 @@ private fun DocumentRow(doc: DocumentEntity, onRetry: (() -> Unit)?, onTap: () -
                             MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                if (bookmarkCount > 0) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        modifier = Modifier.padding(start = 6.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.Bookmark,
+                            contentDescription = "$bookmarkCount bookmarks",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            "$bookmarkCount",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 if (onRetry != null) {
                     IconButton(onClick = onRetry) {
                         Icon(Icons.Default.Refresh, contentDescription = "Retry indexing", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
@@ -694,6 +760,7 @@ private fun DocumentRow(doc: DocumentEntity, onRetry: (() -> Unit)?, onTap: () -
 @Composable
 private fun DocumentGridCard(
     doc: DocumentEntity,
+    bookmarkCount: Int,
     modifier: Modifier = Modifier,
     onTap: () -> Unit,
 ) {
@@ -730,6 +797,29 @@ private fun DocumentGridCard(
                         .size(8.dp)
                         .background(statusColor, RoundedCornerShape(20.dp))
                 )
+                if (bookmarkCount > 0) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(6.dp)
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 4.dp, vertical = 1.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.Bookmark,
+                            contentDescription = "$bookmarkCount bookmarks",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(11.dp),
+                        )
+                        Text(
+                            "$bookmarkCount",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 Text(
                     text = "${doc.pageCount}",
                     style = MaterialTheme.typography.labelSmall,

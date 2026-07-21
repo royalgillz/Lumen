@@ -13,6 +13,10 @@ interface BookmarkDao {
     @Query("SELECT * FROM bookmarks WHERE docUri = :docUri ORDER BY pageNumber")
     fun observeForDocument(docUri: String): Flow<List<BookmarkEntity>>
 
+    /** Per-document bookmark counts, for the Library filter and card badges. */
+    @Query("SELECT docUri, COUNT(*) AS count FROM bookmarks GROUP BY docUri")
+    fun observeCountsByDocument(): Flow<List<BookmarkDocCount>>
+
     @Query("SELECT * FROM bookmarks WHERE docUri = :docUri AND pageNumber = :page LIMIT 1")
     suspend fun getByPage(docUri: String, page: Int): BookmarkEntity?
 
@@ -25,3 +29,5 @@ interface BookmarkDao {
     @Query("DELETE FROM bookmarks WHERE id = :id")
     suspend fun deleteById(id: Long)
 }
+
+data class BookmarkDocCount(val docUri: String, val count: Int)
