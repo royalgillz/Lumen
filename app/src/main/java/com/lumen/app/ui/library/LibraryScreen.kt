@@ -91,13 +91,9 @@ fun LibraryScreen(
 ) {
     val documentsOrNull by viewModel.documents.collectAsState()
     val foldersOrNull by viewModel.folders.collectAsState()
-    val pendingRemovals by viewModel.pendingRemovals.collectAsState()
     val isContentLoaded = documentsOrNull != null && foldersOrNull != null
-    // Folders awaiting Undo-expiry are hidden (along with their documents) so the
-    // list reflects the removal immediately while it can still be undone.
-    val pendingTreeUris = remember(pendingRemovals) { pendingRemovals.map { it.toString() }.toSet() }
-    val documents = documentsOrNull.orEmpty().filter { it.treeUri !in pendingTreeUris }
-    val folders = foldersOrNull.orEmpty() - pendingRemovals
+    val documents = documentsOrNull.orEmpty()
+    val folders = foldersOrNull.orEmpty()
     val isIndexing by viewModel.isIndexing.collectAsState()
     val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
     val totalPages by viewModel.totalPages.collectAsState()
@@ -196,7 +192,7 @@ fun LibraryScreen(
                     Icon(Icons.Default.Warning, contentDescription = null, tint = Terracotta, modifier = Modifier.size(18.dp))
                     Text(
                         text = "${lostPermissionFolders.size} folder${if (lostPermissionFolders.size > 1) "s" else ""} " +
-                            "lost access, remove and re-add using + Add Folder.",
+                            "lost access — remove and re-add in Settings › Data.",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onBackground,
                         modifier = Modifier.weight(1f),
@@ -219,32 +215,6 @@ fun LibraryScreen(
                 )
 
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    if (folders.isNotEmpty()) {
-                        item { SectionHeader("Indexed Folders") }
-                        items(folders.toList(), key = { it.toString() }) { uri ->
-                            SwipeableFolderRow(
-                                uri = uri,
-                                hasLostPermission = uri in lostPermissionFolders,
-                                onRemove = {
-                                    viewModel.requestRemoveFolder(uri)
-                                    scope.launch {
-                                        val res = snackbarHostState.showSnackbar(
-                                            message = "Folder removed",
-                                            actionLabel = "Undo",
-                                            duration = SnackbarDuration.Long,
-                                        )
-                                        if (res == SnackbarResult.ActionPerformed) {
-                                            viewModel.undoRemoveFolder(uri)
-                                        } else {
-                                            viewModel.commitRemoveFolder(uri)
-                                        }
-                                    }
-                                },
-                                onReindex = { viewModel.reindexFolder(uri) },
-                            )
-                        }
-                        item { Spacer(Modifier.height(8.dp)) }
-                    }
                     if (documents.isNotEmpty()) {
                         val failedOrEncrypted = documents.filter {
                             it.status == DocumentEntity.STATUS_ERROR || it.status == DocumentEntity.STATUS_ENCRYPTED
@@ -394,49 +364,6 @@ private fun IndexingBottomBar() {
             )
             Text("Indexing in background…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
         }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SwipeableFolderRow(
-    uri: Uri,
-    hasLostPermission: Boolean,
-    onRemove: () -> Unit,
-    onReindex: () -> Unit,
-) {
-    val haptic = LocalHapticFeedback.current
-    val dismissState = rememberSwipeToDismissBoxState()
-
-    LaunchedEffect(dismissState.currentValue) {
-        if (dismissState.currentValue == SwipeToDismissBoxValue.EndToStart) {
-            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-            onRemove()
-        }
-    }
-
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = false,
-        enableDismissFromEndToStart = true,
-        backgroundContent = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
-                    .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(10.dp)),
-                contentAlignment = Alignment.CenterEnd,
-            ) {
-                Icon(
-                    Icons.Default.Delete,
-                    contentDescription = "Remove folder",
-                    tint = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.padding(end = 20.dp),
-                )
-            }
-        },
-    ) {
-        FolderRow(uri = uri, hasLostPermission = hasLostPermission, onRemove = onRemove, onReindex = onReindex)
     }
 }
 
@@ -625,64 +552,6 @@ private fun formatCount(n: Int): String = when {
     n >= 1_000_000 -> DecimalFormat("0.0M").format(n / 1_000_000.0)
     n >= 1_000 -> DecimalFormat("0.0k").format(n / 1_000.0)
     else -> n.toString()
-}
-
-@Composable
-private fun SectionHeader(title: String) {
-    Text(
-        text = title,
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-    )
-}
-
-@Composable
-private fun FolderRow(
-    uri: Uri,
-    hasLostPermission: Boolean,
-    onRemove: () -> Unit,
-    onReindex: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(10.dp),
-        tonalElevation = 1.dp,
-    ) {
-        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                if (hasLostPermission) Icons.Default.Warning else Icons.Default.FolderOpen,
-                contentDescription = null,
-                tint = if (hasLostPermission) Terracotta else MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(24.dp),
-            )
-            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(
-                    text = folderDisplayName(uri),
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (hasLostPermission) {
-                    Text(
-                        text = "Permission lost, remove and re-add",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Terracotta,
-                    )
-                }
-            }
-            if (!hasLostPermission) {
-                IconButton(onClick = onReindex) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Re-index folder", tint = MaterialTheme.colorScheme.primary)
-                }
-            }
-            IconButton(onClick = onRemove) {
-                Icon(Icons.Default.Delete, contentDescription = "Remove folder", tint = MaterialTheme.colorScheme.error)
-            }
-        }
-    }
 }
 
 @Composable

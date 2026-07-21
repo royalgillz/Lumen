@@ -1,7 +1,14 @@
 package com.lumen.app.ui.settings
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,9 +24,20 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -29,6 +47,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,16 +57,56 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.compose.ui.text.style.TextOverflow
 import com.lumen.app.BuildConfig
+import com.lumen.app.ui.common.folderDisplayName
 import com.lumen.app.ui.icons.LumenBrandIcon
 import com.lumen.app.ui.icons.PrivacyIcon
 import com.lumen.app.ui.icons.SearchDocIcon
 import com.lumen.app.ui.icons.TrashIcon
+import com.lumen.app.ui.theme.Terracotta
 
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var folderPendingRemoval by remember { mutableStateOf<Uri?>(null) }
     val haptic = LocalHapticFeedback.current
+    val folders by viewModel.folders.collectAsState()
+    val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let { viewModel.addFolder(it) }
+    }
+
+    val removalTarget = folderPendingRemoval
+    if (removalTarget != null) {
+        AlertDialog(
+            onDismissRequest = { folderPendingRemoval = null },
+            title = { Text("Remove folder?") },
+            text = {
+                Text(
+                    "“${folderDisplayName(removalTarget)}” and its documents will be " +
+                        "removed from the search index. The files stay on your phone."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.removeFolder(removalTarget)
+                        folderPendingRemoval = null
+                    }
+                ) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { folderPendingRemoval = null }) { Text("Cancel") }
+            },
+        )
+    }
 
     if (showDeleteConfirm) {
         AlertDialog(
@@ -128,6 +187,14 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
 
         SectionLabel("Data")
         DataCard(onDeleteIndex = { showDeleteConfirm = true })
+        Spacer(Modifier.height(12.dp))
+        IndexedFoldersCard(
+            folders = folders,
+            lostPermissionFolders = lostPermissionFolders,
+            onAddFolder = { folderPickerLauncher.launch(null) },
+            onReindexFolder = { viewModel.reindexFolder(it) },
+            onRemoveFolder = { folderPendingRemoval = it },
+        )
         Spacer(Modifier.height(16.dp))
 
         SectionLabel("About")
@@ -238,6 +305,144 @@ private fun DataCard(onDeleteIndex: () -> Unit) {
                 )
                 Spacer(Modifier.width(8.dp))
                 Text("Delete Search Index")
+            }
+        }
+    }
+}
+
+/**
+ * Collapsed by default: a one-line "Indexed Folders · N" row that expands to the
+ * folder list with re-index/remove actions and an add button. The header shows a
+ * warning icon whenever any folder has lost its storage permission, so problems
+ * are visible without expanding.
+ */
+@Composable
+private fun IndexedFoldersCard(
+    folders: Set<Uri>,
+    lostPermissionFolders: Set<Uri>,
+    onAddFolder: () -> Unit,
+    onReindexFolder: (Uri) -> Unit,
+    onRemoveFolder: (Uri) -> Unit,
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 1.dp,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp),
+                )
+                Text(
+                    "Indexed Folders · ${folders.size}",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 12.dp),
+                )
+                if (lostPermissionFolders.isNotEmpty()) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = "${lostPermissionFolders.size} folders lost access",
+                        tint = Terracotta,
+                        modifier = Modifier
+                            .size(18.dp)
+                            .padding(end = 2.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            AnimatedVisibility(visible = expanded, enter = expandVertically(), exit = shrinkVertically()) {
+                Column(modifier = Modifier.padding(start = 16.dp, end = 8.dp, bottom = 12.dp)) {
+                    Text(
+                        "Folders Lumen scans for PDFs. Removing one deletes its documents " +
+                            "from the index, not from your phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    folders.forEach { uri ->
+                        val lost = uri in lostPermissionFolders
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                if (lost) Icons.Default.Warning else Icons.Default.FolderOpen,
+                                contentDescription = null,
+                                tint = if (lost) Terracotta else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 10.dp),
+                            ) {
+                                Text(
+                                    folderDisplayName(uri),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (lost) {
+                                    Text(
+                                        "Permission lost — remove and re-add",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Terracotta,
+                                    )
+                                }
+                            }
+                            if (!lost) {
+                                IconButton(onClick = { onReindexFolder(uri) }) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "Re-index folder",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            }
+                            IconButton(onClick = { onRemoveFolder(uri) }) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = "Remove folder",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }
+                    }
+                    if (folders.isNotEmpty()) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    }
+                    TextButton(onClick = onAddFolder) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Add folder", fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
         }
     }
