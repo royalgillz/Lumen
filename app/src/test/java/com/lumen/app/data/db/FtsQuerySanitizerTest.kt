@@ -6,18 +6,20 @@ import org.junit.Test
 class FtsQuerySanitizerTest {
 
     @Test
-    fun multiWord_andWithPrefixWildcard() {
-        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("hello world"))
+    fun multiWord_spaceJoinedWithPrefixWildcard() {
+        // Space = implicit AND in both standard and enhanced FTS4 query syntax.
+        // " AND " would be a literal term under the standard syntax.
+        assertEquals("hello* world*", FtsQuerySanitizer.sanitize("hello world"))
     }
 
     @Test
     fun doubleQuotes_stripped() {
-        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("hello \"world\""))
+        assertEquals("hello* world*", FtsQuerySanitizer.sanitize("hello \"world\""))
     }
 
     @Test
     fun asterisks_stripped() {
-        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("hello* world*"))
+        assertEquals("hello* world*", FtsQuerySanitizer.sanitize("hello* world*"))
     }
 
     @Test
@@ -27,7 +29,7 @@ class FtsQuerySanitizerTest {
 
     @Test
     fun mixedSpecialChars_allStripped() {
-        assertEquals("hello* AND world*", FtsQuerySanitizer.sanitize("\"hello*\" world*"))
+        assertEquals("hello* world*", FtsQuerySanitizer.sanitize("\"hello*\" world*"))
     }
 
     @Test
@@ -36,7 +38,7 @@ class FtsQuerySanitizerTest {
     }
 
     @Test
-    fun threeWords_andChained() {
-        assertEquals("a* AND b* AND c*", FtsQuerySanitizer.sanitize("a b c"))
+    fun threeWords_spaceChained() {
+        assertEquals("a* b* c*", FtsQuerySanitizer.sanitize("a b c"))
     }
 }

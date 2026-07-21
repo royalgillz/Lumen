@@ -16,11 +16,11 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.lumen.app.R
 import com.lumen.app.data.db.dao.DocumentDao
-import com.lumen.app.data.db.dao.LineDao
 import com.lumen.app.data.db.dao.PageDao
+import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.data.db.entity.DocumentEntity
-import com.lumen.app.data.db.entity.LineContentEntity
 import com.lumen.app.data.db.entity.PageEntity
+import com.lumen.app.data.db.entity.PageTextEntity
 import androidx.room.withTransaction
 import com.lumen.app.data.db.LumenDatabase
 import com.lumen.app.data.fs.PdfFile
@@ -28,7 +28,6 @@ import com.lumen.app.data.fs.PdfScanner
 import com.lumen.app.data.ocr.MlKitOcrEngine
 import com.lumen.app.data.ocr.OcrWordBoxes
 import com.lumen.app.data.ocr.TesseractOcrEngine
-import com.lumen.app.data.pdf.LineExtractor
 import com.lumen.app.data.pdf.PdfPageRenderer
 import com.lumen.app.data.pdf.PdfTextExtractor
 import dagger.assisted.Assisted
@@ -44,13 +43,12 @@ class IndexWorker @AssistedInject constructor(
     private val pdfScanner: PdfScanner,
     private val pdfTextExtractor: PdfTextExtractor,
     private val pdfPageRenderer: PdfPageRenderer,
-    private val lineExtractor: LineExtractor,
     private val mlKitOcrEngine: MlKitOcrEngine,
     private val tesseractOcrEngine: TesseractOcrEngine,
     private val database: LumenDatabase,
     private val documentDao: DocumentDao,
     private val pageDao: PageDao,
-    private val lineDao: LineDao,
+    private val pageTextDao: PageTextDao,
 ) : CoroutineWorker(context, workerParams) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -67,7 +65,11 @@ class IndexWorker @AssistedInject constructor(
             return@withContext Result.failure()
         }
 
-        if (pdfs.isEmpty()) return@withContext Result.success()
+        if (pdfs.isEmpty()) {
+            // Folder whose PDFs were all deleted must empty out of the index too
+            removeVanishedDocuments(folderUri, emptySet())
+            return@withContext Result.success()
+        }
 
         pdfs.forEachIndexed { index, pdf ->
             setProgress(workDataOf(KEY_PROGRESS to index, KEY_TOTAL to pdfs.size))
@@ -89,7 +91,18 @@ class IndexWorker @AssistedInject constructor(
             }
         }
 
+        val seen = pdfs.map { it.uri.toString() }.toSet()
+        removeVanishedDocuments(folderUri, seen)
+
         Result.success()
+    }
+
+    // Drop documents whose files no longer exist in the folder; the FK cascade
+    // cleans up pages/page_text rows.
+    private suspend fun removeVanishedDocuments(folderUri: Uri, seen: Set<String>) {
+        documentDao.idUrisByTreeUri(folderUri.toString()).forEach { row ->
+            if (row.uri !in seen) documentDao.delete(row.id)
+        }
     }
 
     private suspend fun indexPdf(pdf: PdfFile, folderUri: Uri, force: Boolean) {
@@ -164,10 +177,11 @@ class IndexWorker @AssistedInject constructor(
                         wordBoxesJson = if (usedOcr) ocrBoxes[page.index] else null,
                     )
                 )
-                val lines = lineExtractor.extract(finalText).mapIndexed { i, lineText ->
-                    LineContentEntity(pageId = pageId, lineNumber = i, text = lineText)
+                // Page-level FTS row: whole-page text so multi-word AND queries
+                // match across line breaks.
+                if (finalText.isNotBlank()) {
+                    pageTextDao.insert(PageTextEntity(pageId = pageId, text = finalText))
                 }
-                if (lines.isNotEmpty()) lineDao.insertAll(lines)
             }
         }
 

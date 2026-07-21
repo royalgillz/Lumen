@@ -55,15 +55,17 @@ interface DocumentDao {
     @Query("DELETE FROM documents")
     suspend fun deleteAll()
 
-    @Query("""
-        SELECT id, uri, filename, treeUri, indexedAt
-        FROM documents
-        WHERE status = 'indexed'
-          AND instr(lower(filename), lower(:query)) > 0
-        ORDER BY filename
-        LIMIT :limit
-    """)
-    suspend fun searchByFilename(query: String, limit: Int = 200): List<FilenameSearchRow>
+    // Token matching happens in Kotlin (SearchRepository): SQLite's lower() is
+    // ASCII-only and instr() forces contiguous-phrase semantics, so the SQL only
+    // narrows by status and folder filter.
+    @Query("SELECT id, uri, filename, treeUri, indexedAt FROM documents WHERE status = 'indexed' AND (:filterByFolder = 0 OR treeUri IN (:treeUris)) AND (:minIndexedAt = 0 OR indexedAt >= :minIndexedAt)")
+    suspend fun indexedFilenameRows(filterByFolder: Int, treeUris: List<String>, minIndexedAt: Long): List<FilenameSearchRow>
+
+    @Query("SELECT DISTINCT treeUri FROM documents WHERE treeUri != ''")
+    suspend fun distinctTreeUris(): List<String>
+
+    @Query("SELECT id, uri FROM documents WHERE treeUri = :treeUri")
+    suspend fun idUrisByTreeUri(treeUri: String): List<DocIdUri>
 }
 
 data class FilenameSearchRow(
@@ -73,3 +75,5 @@ data class FilenameSearchRow(
     val treeUri: String,
     val indexedAt: Long?,
 )
+
+data class DocIdUri(val id: Long, val uri: String)

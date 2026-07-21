@@ -40,6 +40,17 @@ class PdfHighlighter @Inject constructor(
         } ?: empty(pageIndex)
     }
 
+    /**
+     * Same extraction against an already-open [doc]. NOT gated — the caller must
+     * hold the render permit and serialise document access (see
+     * MuPdfPageRenderer.withDocumentGated), which is what makes this the cheap
+     * path: no per-page document reopen and reparse.
+     */
+    fun findOnPageInDocument(doc: Document, pageIndex: Int, keyword: String): PageHighlights {
+        if (keyword.isBlank()) return empty(pageIndex)
+        return extractForPageLocked(doc, pageIndex, keyword)
+    }
+
     // Gated: toStructuredText allocates native memory proportional to page complexity,
     // so it must share the single render permit with bitmap rasterisation.
     private suspend fun extractForPage(doc: Document, pageIndex: Int, keyword: String): PageHighlights =
@@ -77,6 +88,13 @@ class PdfHighlighter @Inject constructor(
      * match in the buffer can be mapped back to the union of its source char
      * quads.
      *
+     * Multi-word queries are matched per token: search results come from an
+     * AND-of-tokens FTS query, so "climate change" must light up every "climate"
+     * and every "change" on the page — an exact-phrase match would often find
+     * nothing on a page FTS legitimately matched. Matches are returned in
+     * reading order across all tokens; a match fully contained inside another
+     * (from substring-of-each-other tokens) is dropped.
+     *
      * Handles ligature glyphs (fi, fl, ffi…) and supplementary characters
      * (surrogate pairs) by recording one quad per UTF-16 code unit produced.
      */
@@ -86,8 +104,12 @@ class PdfHighlighter @Inject constructor(
         offsetX: Float,
         offsetY: Float,
     ): List<RectF> {
-        val needle = buildLowercaseString(keyword)
-        if (needle.isEmpty()) return emptyList()
+        val needles = keyword.trim()
+            .split(Regex("\\s+"))
+            .map { buildLowercaseString(it) }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        if (needles.isEmpty()) return emptyList()
 
         val buffer = StringBuilder()
         val quads = ArrayList<Quad>(256)
@@ -116,18 +138,32 @@ class PdfHighlighter @Inject constructor(
         }
 
         val haystack = buffer.toString()
-        if (haystack.length < needle.length) return emptyList()
+        if (haystack.isEmpty()) return emptyList()
 
-        val rects = ArrayList<RectF>()
-        var searchFrom = 0
-        while (true) {
-            val idx = haystack.indexOf(needle, searchFrom)
-            if (idx < 0) break
-            val end = idx + needle.length - 1
-            if (end < quads.size) {
-                rects.add(unionRect(quads, idx, end, offsetX, offsetY))
+        // Collect every token's matches as [start, endInclusive] index ranges.
+        val matches = ArrayList<IntRange>()
+        for (needle in needles) {
+            if (haystack.length < needle.length) continue
+            var searchFrom = 0
+            while (true) {
+                val idx = haystack.indexOf(needle, searchFrom)
+                if (idx < 0) break
+                val end = idx + needle.length - 1
+                if (end < quads.size) matches.add(idx..end)
+                searchFrom = idx + needle.length
             }
-            searchFrom = idx + needle.length
+        }
+        if (matches.isEmpty()) return emptyList()
+
+        // Reading order; longest-first at equal starts so containment is caught
+        // by a single max-end sweep.
+        matches.sortWith(compareBy({ it.first }, { -it.last }))
+        val rects = ArrayList<RectF>(matches.size)
+        var maxEnd = -1
+        for (m in matches) {
+            if (m.last <= maxEnd) continue
+            maxEnd = m.last
+            rects.add(unionRect(quads, m.first, m.last, offsetX, offsetY))
         }
         return rects
     }

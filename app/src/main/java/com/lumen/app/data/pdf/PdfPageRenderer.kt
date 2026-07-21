@@ -3,10 +3,10 @@ package com.lumen.app.data.pdf
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
-import com.artifex.mupdf.fitz.ColorSpace
 import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.Page
+import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -72,18 +72,9 @@ class PdfPageRenderer @Inject constructor(
         return try {
             val scale = dpi / 72f
             val matrix = Matrix(scale, scale)
-            val pixmap = try {
-                page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
-            } catch (_: OutOfMemoryError) {
-                return null
-            } catch (_: Throwable) {
-                return null
-            } ?: return null
-            try {
-                pixmapToBitmap(pixmap)
-            } finally {
-                runCatching { pixmap.destroy() }
-            }
+            // Native render straight into an opaque white-backed ARGB_8888 bitmap;
+            // see MuPdfPageRenderer.renderPage for why no Pixmap round-trip.
+            AndroidDrawDevice.drawPage(page, matrix)
         } catch (_: Throwable) {
             null
         } finally {

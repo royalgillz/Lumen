@@ -7,6 +7,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -29,6 +30,7 @@ class SafRepository @Inject constructor(
         private val KEY_VIEWER_SCROLL_HORIZONTAL = booleanPreferencesKey("viewer_scroll_horizontal")
         private val KEY_FILTER_OCR_ONLY = booleanPreferencesKey("filter_ocr_only")
         private val KEY_FILTER_SORT_ORDER = stringPreferencesKey("filter_sort_order")
+        private val KEY_LAST_AUTO_RESCAN_AT = longPreferencesKey("last_auto_rescan_at")
     }
 
     val hasCompletedOnboarding: Flow<Boolean> = dataStore.data.map { prefs ->
@@ -76,14 +78,18 @@ class SafRepository @Inject constructor(
 
     // ── Search history ────────────────────────────────────────────────────────
 
+    // distinct() guards against legacy entries where a '|' inside a query split
+    // into duplicate/phantom items — duplicates crash LazyColumn keys.
     val searchHistory: Flow<List<String>> = dataStore.data.map { prefs ->
         prefs[KEY_SEARCH_HISTORY].orEmpty()
             .split("|")
             .filter { it.isNotBlank() }
+            .distinct()
     }
 
     suspend fun addToSearchHistory(query: String) {
-        val trimmed = query.trim()
+        // '|' is the storage delimiter; a query containing it would corrupt the list.
+        val trimmed = query.trim().replace('|', ' ').trim()
         if (trimmed.length < 2) return
         dataStore.edit { prefs ->
             val current = prefs[KEY_SEARCH_HISTORY].orEmpty()
@@ -134,23 +140,39 @@ class SafRepository @Inject constructor(
         dataStore.edit { it[KEY_FILTER_SORT_ORDER] = sortOrder }
     }
 
+    // ── Auto-rescan timestamp ─────────────────────────────────────────────────
+
+    val lastAutoRescanAt: Flow<Long> = dataStore.data.map { prefs ->
+        prefs[KEY_LAST_AUTO_RESCAN_AT] ?: 0L
+    }
+
+    suspend fun setLastAutoRescanAt(ts: Long) {
+        dataStore.edit { it[KEY_LAST_AUTO_RESCAN_AT] = ts }
+    }
+
     // ── Reading progress ──────────────────────────────────────────────────────
+    // Entries are "key:page". Keys are Uri.encode(uri) — the encoded form has no
+    // raw ':', so the first ':' always separates key from page. Older builds
+    // keyed by uri.hashCode(), which could collide; those entries are read as a
+    // fallback and replaced on the next save.
 
     suspend fun saveLastPage(uri: String, page: Int) {
-        val hashKey = uri.hashCode().toString()
+        val encodedKey = Uri.encode(uri)
+        val legacyKey = uri.hashCode().toString()
         dataStore.edit { prefs ->
             val current = prefs[KEY_VIEWER_LAST_PAGES].orEmpty().toMutableSet()
-            current.removeIf { it.startsWith("$hashKey:") }
-            current.add("$hashKey:$page")
+            current.removeIf { it.startsWith("$encodedKey:") || it.startsWith("$legacyKey:") }
+            current.add("$encodedKey:$page")
             prefs[KEY_VIEWER_LAST_PAGES] = current
         }
     }
 
     suspend fun getLastPage(uri: String): Int? {
-        val hashKey = uri.hashCode().toString()
-        return dataStore.data.first()[KEY_VIEWER_LAST_PAGES].orEmpty()
-            .firstOrNull { it.startsWith("$hashKey:") }
-            ?.substringAfter(':')
-            ?.toIntOrNull()
+        val entries = dataStore.data.first()[KEY_VIEWER_LAST_PAGES].orEmpty()
+        val encodedKey = Uri.encode(uri)
+        val legacyKey = uri.hashCode().toString()
+        val entry = entries.firstOrNull { it.startsWith("$encodedKey:") }
+            ?: entries.firstOrNull { it.startsWith("$legacyKey:") }
+        return entry?.substringAfter(':')?.toIntOrNull()
     }
 }

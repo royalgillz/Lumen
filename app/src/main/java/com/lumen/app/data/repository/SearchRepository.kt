@@ -3,82 +3,115 @@ package com.lumen.app.data.repository
 import android.net.Uri
 import android.provider.DocumentsContract
 import com.lumen.app.data.db.dao.DocumentDao
-import com.lumen.app.data.db.dao.LineDao
+import com.lumen.app.data.db.dao.PageSearchRow
+import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class SearchRepository @Inject constructor(
-    private val lineDao: LineDao,
+    private val pageTextDao: PageTextDao,
     private val documentDao: DocumentDao,
 ) {
     data class Output(val results: List<SearchResult>, val isTruncated: Boolean)
 
+    /**
+     * Content search runs against the page-level FTS index: one result row per
+     * matching PAGE, with every query token somewhere on that page (line breaks
+     * don't matter). Relevance is computed from FTS4 matchinfo — total token hits
+     * on the page — plus a boost when the filename also contains query tokens.
+     */
     suspend fun search(
         rawQuery: String,
         sanitizedQuery: String,
         filters: SearchFilters = SearchFilters(),
     ): Output {
-        val rows = lineDao.search(sanitizedQuery)
-
-        val contentFiltered = rows.filter { row ->
-            (filters.folderIds.isEmpty() || treeUriToFolderId(row.treeUri) in filters.folderIds) &&
-                (!filters.ocrOnly || row.isOcr)
+        // Folder filter is expressed as tree *document IDs*; documents store full
+        // tree URI strings. Resolve the selected IDs to the matching URI strings so
+        // the filter can run inside the SQL, before the row cap.
+        val filterByFolder = filters.folderIds.isNotEmpty()
+        val selectedTreeUris = if (filterByFolder) {
+            documentDao.distinctTreeUris().filter { treeUriToFolderId(it) in filters.folderIds }
+        } else {
+            emptyList()
         }
+        if (filterByFolder && selectedTreeUris.isEmpty()) return Output(emptyList(), false)
 
-        // `rows` arrives ordered by (filename, pageNumber, lineNumber), so iterating
-        // here yields each page's matches in reading order — the running counter is
-        // the occurrence's rank on its page.
-        val occurrenceByLineId = HashMap<Long, Int>()
-        val pageMatchCounters = HashMap<Pair<Long, Int>, Int>()
-        for (row in contentFiltered) {
-            val key = row.docId to row.pageNumber
-            val rank = pageMatchCounters.getOrDefault(key, 0)
-            occurrenceByLineId[row.lineId] = rank
-            pageMatchCounters[key] = rank + 1
-        }
+        val minIndexedAt = filters.indexedWithin.cutoffMillis()
 
-        // Filename search complements content search. Skip when OCR-only filter is active.
-        val filenameRows = if (filters.ocrOnly) {
+        val rows = pageTextDao.searchPages(
+            query = sanitizedQuery,
+            filterByFolder = if (filterByFolder) 1 else 0,
+            treeUris = selectedTreeUris,
+            ocrOnly = if (filters.ocrOnly) 1 else 0,
+            minIndexedAt = minIndexedAt,
+            limit = CANDIDATE_LIMIT + 1,
+        )
+        val contentTruncated = rows.size > CANDIDATE_LIMIT
+        val candidates = if (contentTruncated) rows.take(CANDIDATE_LIMIT) else rows
+
+        val queryTokens = rawQuery.lowercase()
+            .split(Regex("\\s+"))
+            .filter { it.isNotEmpty() }
+
+        // Filename search complements content search. Skip when OCR-only filter is
+        // active. Token matching runs in Kotlin because SQLite's lower() is
+        // ASCII-only and instr() would force contiguous-phrase semantics; here each
+        // token may appear anywhere in the (locale-aware lowercased) filename.
+        val filenameRows = if (filters.ocrOnly || queryTokens.isEmpty()) {
             emptyList()
         } else {
-            documentDao.searchByFilename(rawQuery)
-                .filter { row -> filters.folderIds.isEmpty() || treeUriToFolderId(row.treeUri) in filters.folderIds }
-                .filter { row -> contentFiltered.none { it.docId == row.id } }
+            documentDao.indexedFilenameRows(
+                filterByFolder = if (filterByFolder) 1 else 0,
+                treeUris = selectedTreeUris,
+                minIndexedAt = minIndexedAt,
+            )
+                .filter { row ->
+                    val filenameLower = row.filename.lowercase()
+                    queryTokens.all { filenameLower.contains(it) }
+                }
+                .filter { row -> candidates.none { it.docId == row.id } }
+                .take(FILENAME_MATCH_LIMIT)
         }
 
+        // matchinfo is parsed once per row and reused for both the relevance score
+        // and the per-result hitCount.
+        val rowsWithHits = candidates.map { it to matchInfoTotalHits(it.matchInfo) }
+
         val contentSorted = when (filters.sortOrder) {
-            SortOrder.RELEVANCE -> contentFiltered
-            SortOrder.FILENAME -> contentFiltered.sortedBy { it.filename.lowercase() }
-            SortOrder.MOST_RECENT -> contentFiltered.sortedByDescending { it.indexedAt ?: 0L }
+            SortOrder.RELEVANCE -> rowsWithHits
+                .map { (row, hits) -> Triple(row, hits, relevanceScore(row, hits, queryTokens)) }
+                .sortedWith(
+                    compareByDescending<Triple<PageSearchRow, Int, Int>> { it.third }
+                        .thenBy { it.first.filename.lowercase() }
+                        .thenBy { it.first.pageNumber }
+                )
+                .map { it.first to it.second }
+            SortOrder.FILENAME -> rowsWithHits
+                .sortedWith(compareBy({ it.first.filename.lowercase() }, { it.first.pageNumber }))
+            SortOrder.MOST_RECENT -> rowsWithHits
+                .sortedWith(
+                    compareByDescending<Pair<PageSearchRow, Int>> { it.first.indexedAt ?: 0L }
+                        .thenBy { it.first.pageNumber }
+                )
         }
         val filenameSorted = when (filters.sortOrder) {
             SortOrder.RELEVANCE, SortOrder.FILENAME -> filenameRows.sortedBy { it.filename.lowercase() }
             SortOrder.MOST_RECENT -> filenameRows.sortedByDescending { it.indexedAt ?: 0L }
         }
 
+        // Filename matches go first: when the query names a document, that document
+        // is almost always what the user wants, and appending them after content
+        // matches let the 200-row cap silently drop them.
         val combined = buildList {
-            addAll(contentSorted.map { row ->
-                SearchResult(
-                    lineId = row.lineId,
-                    docId = row.docId,
-                    uri = row.uri,
-                    filename = row.filename,
-                    pageNumber = row.pageNumber,
-                    lineNumber = row.lineNumber,
-                    snippet = row.snippet,
-                    isOcr = row.isOcr,
-                    folderName = treeUriToFolderName(row.treeUri),
-                    isFilenameMatch = false,
-                    occurrenceOnPage = occurrenceByLineId[row.lineId] ?: 0,
-                )
-            })
             addAll(filenameSorted.map { row ->
                 SearchResult(
-                    // Negative synthetic IDs prevent key collisions with line IDs.
+                    // Negative synthetic IDs prevent key collisions with page IDs.
                     lineId = -row.id,
                     docId = row.id,
                     uri = row.uri,
@@ -91,15 +124,85 @@ class SearchRepository @Inject constructor(
                     isFilenameMatch = true,
                 )
             })
+            addAll(contentSorted.map { (row, hits) ->
+                SearchResult(
+                    // Page-granularity results: the stable row key is the page id.
+                    lineId = row.pageId,
+                    docId = row.docId,
+                    uri = row.uri,
+                    filename = row.filename,
+                    pageNumber = row.pageNumber,
+                    lineNumber = 0,
+                    snippet = row.snippet,
+                    isOcr = row.isOcr,
+                    folderName = treeUriToFolderName(row.treeUri),
+                    isFilenameMatch = false,
+                    // The viewer computes exact rects itself and starts at the first
+                    // occurrence — a per-line rank could never index token rects
+                    // reliably (a line with two hits is one FTS row).
+                    occurrenceOnPage = 0,
+                    hitCount = hits,
+                )
+            })
         }
 
-        val truncated = combined.size > 200
-        val results = combined.take(200)
+        val truncated = contentTruncated || combined.size > RESULT_LIMIT
+        val results = combined.take(RESULT_LIMIT)
         return Output(results, truncated)
     }
 
     suspend fun searchPagesInDocument(sanitizedQuery: String, docUri: String): List<Int> =
-        lineDao.searchPagesInDocument(sanitizedQuery, docUri)
+        pageTextDao.searchPagesInDocument(sanitizedQuery, docUri)
+
+    /** Precomputed matchinfo hits on the page + a boost per token that also
+     *  appears in the filename. */
+    private fun relevanceScore(row: PageSearchRow, hits: Int, queryTokens: List<String>): Int {
+        var score = hits
+        if (queryTokens.isNotEmpty()) {
+            val filenameLower = row.filename.lowercase()
+            score += queryTokens.count { filenameLower.contains(it) } * FILENAME_TOKEN_BOOST
+        }
+        return score
+    }
+
+    /**
+     * Parse an FTS4 matchinfo blob in 'pcx' format: [p][c] then, per phrase and
+     * column, [hits this row][hits all rows][docs with hits] — 32-bit LE ints.
+     * Returns the sum of this-row hits across all phrases (our only column is 0).
+     */
+    private fun matchInfoTotalHits(blob: ByteArray?): Int {
+        if (blob == null || blob.size < 8) return 0
+        return try {
+            val buf = ByteBuffer.wrap(blob).order(ByteOrder.LITTLE_ENDIAN)
+            val phrases = buf.int
+            val columns = buf.int
+            var total = 0
+            repeat(phrases * columns) {
+                if (buf.remaining() < 12) return total
+                total += buf.int
+                buf.int
+                buf.int
+            }
+            total
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    private companion object {
+        /** Final result-list cap. */
+        const val RESULT_LIMIT = 200
+
+        /** Candidate pool ranked in memory. Larger than the result cap so ranking
+         *  has slack; fetched in rowid order (no alphabetical bias). */
+        const val CANDIDATE_LIMIT = 600
+
+        /** A query token appearing in the filename outweighs several body hits. */
+        const val FILENAME_TOKEN_BOOST = 20
+
+        /** Cap on filename-match rows, applied after token filtering in Kotlin. */
+        const val FILENAME_MATCH_LIMIT = 200
+    }
 
     private fun treeUriToFolderName(treeUri: String): String {
         if (treeUri.isBlank()) return ""

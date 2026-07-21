@@ -15,4 +15,6 @@ data class SearchResult(
     // 0-based rank of this match among matches on the same page, in reading order.
     // Lets the viewer open with the correct occurrence highlighted, not the first.
     val occurrenceOnPage: Int = 0,
+    // Number of query-token hits on the page (0 for filename-only matches).
+    val hitCount: Int = 0,
 )

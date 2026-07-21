@@ -20,7 +20,12 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): LumenDatabase =
         Room.databaseBuilder(context, LumenDatabase::class.java, "lumen.db")
-            .addMigrations(LumenDatabase.MIGRATION_3_4, LumenDatabase.MIGRATION_4_5)
+            .addMigrations(
+                LumenDatabase.MIGRATION_3_4,
+                LumenDatabase.MIGRATION_4_5,
+                LumenDatabase.MIGRATION_5_6,
+                LumenDatabase.MIGRATION_6_7,
+            )
             .fallbackToDestructiveMigration(true)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
@@ -36,5 +41,5 @@ object DatabaseModule {
     fun providePageDao(db: LumenDatabase) = db.pageDao()
 
     @Provides
-    fun provideLineDao(db: LumenDatabase) = db.lineDao()
+    fun providePageTextDao(db: LumenDatabase) = db.pageTextDao()
 }
