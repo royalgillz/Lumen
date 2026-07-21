@@ -1,6 +1,6 @@
 # Privacy Policy — Lumen
 
-**Last updated: May 2026**
+**Applies to: Lumen v1.0 · Last updated: May 2026**
 
 Lumen collects no data. Here is exactly what happens on your device:
 
@@ -20,6 +20,7 @@ Lumen collects no data. Here is exactly what happens on your device:
 | `FOREGROUND_SERVICE` | To run indexing in the background with a visible notification |
 | `RECEIVE_BOOT_COMPLETED` | To restart background sync after device reboot |
 | `WAKE_LOCK` | To keep the processor awake during indexing |
+| `POST_NOTIFICATIONS` (Android 13+) | To show the indexing progress notification |
 
 No other permissions are requested or used.
 

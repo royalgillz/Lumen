@@ -53,12 +53,12 @@ Verify this yourself in **Settings → Privacy Audit** inside the app.
 | DI | Hilt |
 | Database | Room + FTS4 (full-text search) |
 | PDF text extraction | PdfBox-Android (Apache-2.0) |
-| PDF rendering | Android PdfRenderer |
+| PDF rendering (viewer · OCR · thumbnails) | MuPDF fitz (AGPL) |
 | OCR | ML Kit Text Recognition v2 (bundled, offline) |
 | OCR fallback | Tesseract4Android |
 | File access | Storage Access Framework (SAF) — no dangerous permissions |
 | Background indexing | WorkManager |
-| PDF viewer | AndroidPdfViewer (barteksc / PDFium) |
+| PDF viewer | MuPDF fitz + custom single-canvas Android View |
 | Preferences | DataStore |
 
 ---
@@ -141,6 +141,38 @@ Issues and pull requests are welcome. Please open an issue before starting signi
 - Do not add any SDK that requires network access
 - Do not add the INTERNET permission under any circumstances
 - Keep the APK size reasonable — avoid bundling large assets
+
+---
+
+## Versions
+
+Releases are tagged in git. `master` holds the latest released build; active
+development happens on the `develop` branch.
+
+| Version | Tag | Highlights |
+|---|---|---|
+| **1.1** | `v1.1` | Page-level FTS index (DB v7) with relevance ranking and grouped results, search filters (folders, OCR-only, sort, indexed date) with always-visible reset, incremental rescan, viewer zoom pill with live percentage, print and save-a-copy, notification permission flow, and release signing under the new `io.github.royalgillz.lumen` application ID. |
+| **1.0** | `v1.0` | First complete build — offline FTS4 full-text search, MuPDF PDF viewer with occurrence-level in-document search and keyword highlighting, OCR highlight boxes for scanned pages, Drive-style fast-scroll thumb, device-aware viewer memory bounds, and the privacy-first Library/Settings design. |
+
+### Changelog
+
+**1.1**
+- Search rebuilt on a page-level FTS index (DB v7): results grouped by document with per-page hit counts, relevance ranking with filename boost, fixed AND-literal queries
+- Search filters: folder, OCR-only, sort order, and indexed-date (Any time / Today / This week / This month) with an always-visible Reset and active-filter chips
+- Incremental library rescan and smarter OCR page selection during indexing
+- Viewer: zoom pill with live percentage (tap to reset to 100%), print, save-a-copy, word selection via long-press, page snapping, accessibility announcements, highlight auto-pan and state-leak fixes
+- Bottom navigation: bold forest-green selected state; terracotta accent refinements across the app
+- Android 13+ notification permission request for indexing progress; INTERNET permission force-removed from merged manifest (ML Kit transport dependency) so the app physically cannot go online
+- Release signing config and new application ID `io.github.royalgillz.lumen`
+
+**1.0**
+- Full-text search across indexed PDFs (filename · page · snippet)
+- PDF viewer: in-document search stepping every occurrence, amber keyword highlights, internal/external links, resume-at-last-page, brightness, scroll-mode toggle, share via overflow menu
+- Highlighting on scanned pages from OCR word boxes captured at index time
+- Fast-scroll thumb with page bubble (vertical mode)
+- Bounded viewer memory (single render gate, device-aware bitmap cache, trim-on-pressure)
+- Library: stats, Error Center for failed/encrypted files, force re-index
+- Privacy Audit screen; no `INTERNET` permission
 
 ---
 

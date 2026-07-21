@@ -1,12 +1,16 @@
 package com.lumen.app
 
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.lumen.app.ui.navigation.LumenNavGraph
@@ -19,9 +23,13 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private var externalPdfUriState: androidx.compose.runtime.MutableState<String?>? = null
 
+    private val requestNotificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op: indexing proceeds regardless */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        maybeRequestNotificationPermission()
         setContent {
             val externalPdfUri = androidx.compose.runtime.remember {
                 androidx.compose.runtime.mutableStateOf(extractPdfUri(intent))
@@ -43,6 +51,20 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         externalPdfUriState?.value = extractPdfUri(intent)
+    }
+
+    /**
+     * On Android 13+ the foreground-service indexing notification is suppressed unless the
+     * user has granted POST_NOTIFICATIONS. Request it once; indexing still runs if declined.
+     */
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this, android.Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            requestNotificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun extractPdfUri(intent: Intent?): String? {

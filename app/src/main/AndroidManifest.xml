@@ -19,11 +19,21 @@
     <!-- WorkManager keeps CPU awake during indexing -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Show the indexing progress notification (runtime permission on Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- INTENTIONALLY ABSENT:
          android.permission.INTERNET
          android.permission.ACCESS_NETWORK_STATE
          android.permission.MANAGE_EXTERNAL_STORAGE
          Any ad/analytics SDK permissions -->
+
+    <!-- ML Kit transitively pulls in com.google.android.datatransport (Google's
+         Clearcut telemetry backend), which merges INTERNET + ACCESS_NETWORK_STATE
+         back into the manifest. Force-remove them so the shipped app physically
+         cannot make network requests. Without INTERNET the transport backend is inert. -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
 
     <application
         android:name=".LumenApplication"
