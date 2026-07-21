@@ -15,8 +15,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -36,7 +37,6 @@ import com.lumen.app.ui.icons.SearchTabIcon
 import com.lumen.app.ui.search.SearchScreen
 import com.lumen.app.ui.settings.SettingsScreen
 import androidx.compose.material3.MaterialTheme
-import com.lumen.app.ui.theme.AmberAccent
 import com.lumen.app.ui.viewer.PdfViewerScreen
 
 sealed class Screen(val route: String) {
@@ -89,7 +89,9 @@ fun LumenNavGraph(
 ) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
-    val handledExternalUri = remember { mutableStateOf<String?>(null) }
+    // Saveable: a plain remember reset on rotation, so the effect below re-fired
+    // and pushed a second viewer for the same external PDF.
+    val handledExternalUri = rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(externalPdfUri) {
         val uri = externalPdfUri ?: return@LaunchedEffect
@@ -121,11 +123,16 @@ fun LumenNavGraph(
                                 }
                             },
                             icon = { tab.icon(selected) },
-                            label = { Text(tab.label) },
+                            label = {
+                                Text(
+                                    tab.label,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                )
+                            },
                             colors = NavigationBarItemDefaults.colors(
-                                indicatorColor = AmberAccent.copy(alpha = 0.18f),
+                                indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = AmberAccent,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             ),
@@ -152,7 +159,10 @@ fun LumenNavGraph(
             composable(Screen.Search.route) {
                 SearchScreen(
                     onResultClick = { uri, page, filename, keyword, occurrence ->
-                        navController.navigate(pdfViewerRoute(uri, page, filename, keyword, occurrence))
+                        // singleTop so a double-tap can't stack two viewer copies.
+                        navController.navigate(pdfViewerRoute(uri, page, filename, keyword, occurrence)) {
+                            launchSingleTop = true
+                        }
                     },
                     onOpenLibrary = {
                         navController.navigate(Screen.Library.route) {
@@ -168,7 +178,9 @@ fun LumenNavGraph(
             composable(Screen.Library.route) {
                 LibraryScreen(
                     onOpenDocument = { uri, filename ->
-                        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename))
+                        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename)) {
+                            launchSingleTop = true
+                        }
                     },
                 )
             }

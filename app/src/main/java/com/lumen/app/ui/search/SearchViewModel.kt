@@ -8,6 +8,7 @@ import androidx.work.WorkManager
 import com.lumen.app.data.db.dao.DocumentDao
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.fs.SafRepository
+import com.lumen.app.data.repository.SearchRepository
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
@@ -21,7 +22,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
@@ -52,8 +52,14 @@ class SearchViewModel @Inject constructor(
     private val _isTruncated = MutableStateFlow(false)
     val isTruncated: StateFlow<Boolean> = _isTruncated
 
-    val indexedCount: StateFlow<Int> = documentDao.observeIndexedCount()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    private val _searchFailed = MutableStateFlow(false)
+    val searchFailed: StateFlow<Boolean> = _searchFailed
+
+    // Null until the first DB emission, so the UI can distinguish "still loading"
+    // from a genuinely empty library and not flash the "Nothing indexed" state.
+    val indexedCount: StateFlow<Int?> = documentDao.observeIndexedCount()
+        .map<Int, Int?> { it }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val isIndexing: StateFlow<Boolean> = workManager
         .getWorkInfosByTagFlow("index")
@@ -81,26 +87,52 @@ class SearchViewModel @Inject constructor(
             }
         }
 
+        // Shimmer turns on immediately while typing, but results are only replaced
+        // when the debounced search lands — clearing them per keystroke caused
+        // flicker, and combining the eager clear with distinctUntilChanged left the
+        // screen stuck on an empty shimmer when a keystroke was reverted within the
+        // debounce window (the duplicate emission was suppressed, so nothing ever
+        // reset isSearching). No distinctUntilChanged: re-running an identical FTS
+        // query is cheap and guarantees the searching flag always resolves.
         @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
-        combine(query, filters) { q, f -> q to f }
+        combine(query, filters) { q, f -> q.trim() to f }
             .onEach { (q, _) ->
-                _results.value = emptyList()
-                _isTruncated.value = false
-                if (q.trim().length >= 2) _isSearching.value = true
+                _isSearching.value = q.length >= 2
+                // Editing the query dismisses a previous failure immediately —
+                // showing "Search failed" over a query being corrected is noise.
+                _searchFailed.value = false
             }
             .debounce(200)
-            .distinctUntilChanged()
             .mapLatest { (q, f) ->
-                try {
-                    searchUseCase(q, f)
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    null
+                if (q.length < 2) {
+                    SearchOutcome.Idle
+                } else {
+                    try {
+                        SearchOutcome.Success(searchUseCase(q, f))
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        SearchOutcome.Error
+                    }
                 }
             }
-            .onEach { output ->
-                _results.value = output?.results ?: emptyList()
-                _isTruncated.value = output?.isTruncated ?: false
+            .onEach { outcome ->
+                when (outcome) {
+                    SearchOutcome.Idle -> {
+                        _results.value = emptyList()
+                        _isTruncated.value = false
+                        _searchFailed.value = false
+                    }
+                    is SearchOutcome.Success -> {
+                        _results.value = outcome.output.results
+                        _isTruncated.value = outcome.output.isTruncated
+                        _searchFailed.value = false
+                    }
+                    SearchOutcome.Error -> {
+                        _results.value = emptyList()
+                        _isTruncated.value = false
+                        _searchFailed.value = true
+                    }
+                }
                 _isSearching.value = false
             }
             .launchIn(viewModelScope)
@@ -125,5 +157,11 @@ class SearchViewModel @Inject constructor(
 
     fun clearHistory() {
         viewModelScope.launch { safRepository.clearSearchHistory() }
+    }
+
+    private sealed class SearchOutcome {
+        data object Idle : SearchOutcome()
+        data class Success(val output: SearchRepository.Output) : SearchOutcome()
+        data object Error : SearchOutcome()
     }
 }

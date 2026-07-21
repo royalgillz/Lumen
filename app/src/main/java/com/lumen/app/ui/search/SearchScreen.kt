@@ -40,6 +40,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
@@ -65,6 +66,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Button
@@ -73,6 +75,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,6 +85,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -94,12 +98,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.domain.model.IndexedWithin
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
 import com.lumen.app.ui.common.PdfThumbnail
+import com.lumen.app.ui.common.folderDisplayName
 import com.lumen.app.ui.icons.LumenBrandIcon
 import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.theme.Terracotta
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,6 +119,7 @@ fun SearchScreen(
     val results by viewModel.results.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
     val isTruncated by viewModel.isTruncated.collectAsState()
+    val searchFailed by viewModel.searchFailed.collectAsState()
     val indexedCount by viewModel.indexedCount.collectAsState()
     val isIndexing by viewModel.isIndexing.collectAsState()
     val searchHistory by viewModel.searchHistory.collectAsState()
@@ -125,7 +133,8 @@ fun SearchScreen(
     val showHistory = isSearchFieldFocused && query.isBlank() && searchHistory.isNotEmpty()
     val activeFilterCount = (if (filters.folderIds.isNotEmpty()) 1 else 0) +
         (if (filters.ocrOnly) 1 else 0) +
-        (if (filters.sortOrder != SortOrder.RELEVANCE) 1 else 0)
+        (if (filters.sortOrder != SortOrder.RELEVANCE) 1 else 0) +
+        (if (filters.indexedWithin != IndexedWithin.ANY_TIME) 1 else 0)
 
     if (showFilterSheet) {
         SearchFilterSheet(
@@ -162,6 +171,9 @@ fun SearchScreen(
             },
             onResetSort = {
                 viewModel.filters.value = filters.copy(sortOrder = SortOrder.RELEVANCE)
+            },
+            onResetIndexedWithin = {
+                viewModel.filters.value = filters.copy(indexedWithin = IndexedWithin.ANY_TIME)
             },
             onClearAll = { viewModel.filters.value = SearchFilters() },
         )
@@ -200,19 +212,28 @@ fun SearchScreen(
                     onOpenDocument = { doc -> onResultClick(doc.uri, 0, doc.filename, "", 0) },
                     onOpenLibrary = onOpenLibrary,
                 )
-                isSearching -> SkeletonResultList()
+                searchFailed -> SearchErrorState()
+                // Keep stale results visible while a refinement is in flight; the
+                // skeleton is only for searches with nothing to show yet.
+                isSearching && results.isEmpty() -> SkeletonResultList()
                 results.isEmpty() -> NoResultsState(
                     query = query,
+                    hasActiveFilters = activeFilterCount > 0,
                     onOpenLibrary = onOpenLibrary,
                     onClearQuery = { viewModel.query.value = "" },
+                    onClearFilters = { viewModel.filters.value = SearchFilters() },
                 )
                 else -> ResultList(
                     query = query,
                     results = results,
                     isTruncated = isTruncated,
-                    onResultClick = { uri, page, filename, occurrence ->
+                    onResultClick = { result ->
                         viewModel.onResultSelected(query.trim())
-                        onResultClick(uri, page, filename, query.trim(), occurrence)
+                        // Filename matches have no in-text occurrence — opening with a
+                        // keyword would make the viewer hunt for a phantom highlight.
+                        val keyword = if (result.isFilenameMatch) "" else query.trim()
+                        val occurrence = if (result.isFilenameMatch) 0 else result.occurrenceOnPage
+                        onResultClick(result.uri, result.pageNumber, result.filename, keyword, occurrence)
                     },
                 )
             }
@@ -223,13 +244,14 @@ fun SearchScreen(
 @Composable
 private fun SearchHeader(
     query: String,
-    indexedCount: Int,
+    indexedCount: Int?,
     activeFilterCount: Int,
     onQueryChange: (String) -> Unit,
     onClearQuery: () -> Unit,
     onFocusChange: (Boolean) -> Unit,
     onFilterClick: () -> Unit,
 ) {
+    val focusManager = LocalFocusManager.current
     Column(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
         Row(
             modifier = Modifier
@@ -289,6 +311,7 @@ private fun SearchHeader(
                     } else null,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
                     colors = TextFieldDefaults.colors(
                         focusedContainerColor = Color.Transparent,
                         unfocusedContainerColor = Color.Transparent,
@@ -306,7 +329,7 @@ private fun SearchHeader(
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .border(
                         width = if (activeFilterCount > 0) 1.dp else 0.dp,
-                        color = if (activeFilterCount > 0) AmberAccent.copy(alpha = 0.55f) else Color.Transparent,
+                        color = if (activeFilterCount > 0) Terracotta.copy(alpha = 0.55f) else Color.Transparent,
                         shape = RoundedCornerShape(12.dp),
                     )
                     .clickable(onClick = onFilterClick),
@@ -315,7 +338,7 @@ private fun SearchHeader(
                 Icon(
                     Icons.Default.FilterList,
                     contentDescription = "Filters",
-                    tint = if (activeFilterCount > 0) AmberAccent
+                    tint = if (activeFilterCount > 0) Terracotta
                            else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
@@ -323,7 +346,7 @@ private fun SearchHeader(
                     Box(
                         modifier = Modifier
                             .size(14.dp)
-                            .background(AmberAccent, CircleShape)
+                            .background(Terracotta, CircleShape)
                             .align(Alignment.TopEnd)
                             .padding(end = 2.dp, top = 2.dp),
                         contentAlignment = Alignment.Center,
@@ -338,7 +361,7 @@ private fun SearchHeader(
             }
         }
 
-        if (indexedCount > 0) {
+        if (indexedCount != null && indexedCount > 0) {
             Text(
                 text = "Searching across $indexedCount ${if (indexedCount == 1) "PDF" else "PDFs"} · offline",
                 style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
@@ -432,16 +455,81 @@ private fun SkeletonResultList() {
     }
 }
 
+private const val COLLAPSED_PAGE_ROWS = 3
+
+private data class DocGroup(
+    val docId: Long,
+    val pages: List<SearchResult>,
+)
+
+private sealed interface ResultListEntry {
+    // LazyColumn key — Long lineIds for rows, prefixed strings for synthetic items,
+    // so the two namespaces can never collide.
+    val key: Any
+
+    data class FileMatch(val result: SearchResult) : ResultListEntry {
+        override val key: Any get() = result.lineId
+    }
+
+    data class DocHeader(val group: DocGroup) : ResultListEntry {
+        override val key: Any get() = "doc-${group.docId}"
+    }
+
+    data class PageRow(val result: SearchResult, val isLastInCard: Boolean) : ResultListEntry {
+        override val key: Any get() = result.lineId
+    }
+
+    data class ExpandToggle(val docId: Long, val totalPages: Int, val expanded: Boolean) : ResultListEntry {
+        override val key: Any get() = "toggle-$docId"
+    }
+}
+
+// Groups content results by document in order of first appearance (preserving the
+// relevance ranking); filename matches stay standalone rows at their original position.
+private fun buildResultEntries(
+    results: List<SearchResult>,
+    expandedDocIds: Set<Long>,
+): List<ResultListEntry> {
+    val entries = mutableListOf<ResultListEntry>()
+    val grouped = LinkedHashMap<Long, MutableList<SearchResult>>()
+    for (result in results) {
+        if (result.isFilenameMatch) {
+            entries.add(ResultListEntry.FileMatch(result))
+        } else {
+            grouped.getOrPut(result.docId) { mutableListOf() }.add(result)
+        }
+    }
+    for ((docId, pages) in grouped) {
+        entries.add(ResultListEntry.DocHeader(DocGroup(docId, pages)))
+        val needsToggle = pages.size > COLLAPSED_PAGE_ROWS
+        val expanded = docId in expandedDocIds
+        val visible = if (needsToggle && !expanded) pages.take(COLLAPSED_PAGE_ROWS) else pages
+        visible.forEachIndexed { i, page ->
+            entries.add(ResultListEntry.PageRow(page, isLastInCard = !needsToggle && i == visible.lastIndex))
+        }
+        if (needsToggle) {
+            entries.add(ResultListEntry.ExpandToggle(docId, pages.size, expanded))
+        }
+    }
+    return entries
+}
+
 @Composable
 private fun ResultList(
     query: String,
     results: List<SearchResult>,
     isTruncated: Boolean,
-    onResultClick: (uri: String, page: Int, filename: String, occurrence: Int) -> Unit,
+    onResultClick: (SearchResult) -> Unit,
 ) {
     val label = if (results.size == 1) "1 result" else "${results.size} results"
+    // List<Long> rather than Set: autoSaver can round-trip it through the Bundle.
+    var expandedDocIds by rememberSaveable { mutableStateOf(listOf<Long>()) }
+    val entries = remember(results, expandedDocIds) {
+        buildResultEntries(results, expandedDocIds.toSet())
+    }
+
     LazyColumn(modifier = Modifier.fillMaxSize()) {
-        item {
+        item(key = "results-count") {
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
@@ -449,21 +537,47 @@ private fun ResultList(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             )
         }
-        itemsIndexed(results, key = { _, item -> item.lineId }) { index, result ->
+        itemsIndexed(entries, key = { _, entry -> entry.key }) { index, entry ->
+            // Cap the stagger: an uncapped index * 20ms left rows scrolled to from
+            // deep in the list invisible for seconds after they composed.
+            val delay = index.coerceAtMost(10) * 20
             androidx.compose.animation.AnimatedVisibility(
                 visible = true,
-                enter = fadeIn(animationSpec = tween(220, delayMillis = index * 20)) +
-                    slideInHorizontally(animationSpec = tween(220, delayMillis = index * 20), initialOffsetX = { it / 4 }),
+                enter = fadeIn(animationSpec = tween(220, delayMillis = delay)) +
+                    slideInHorizontally(animationSpec = tween(220, delayMillis = delay), initialOffsetX = { it / 4 }),
             ) {
-                ResultRow(
-                    query = query,
-                    result = result,
-                    onClick = { onResultClick(result.uri, result.pageNumber, result.filename, result.occurrenceOnPage) },
-                )
+                when (entry) {
+                    is ResultListEntry.FileMatch -> ResultRow(
+                        query = query,
+                        result = entry.result,
+                        onClick = { onResultClick(entry.result) },
+                    )
+                    is ResultListEntry.DocHeader -> DocumentGroupHeader(
+                        group = entry.group,
+                        onClick = { onResultClick(entry.group.pages.first()) },
+                    )
+                    is ResultListEntry.PageRow -> PageMatchRow(
+                        query = query,
+                        result = entry.result,
+                        isLastInCard = entry.isLastInCard,
+                        onClick = { onResultClick(entry.result) },
+                    )
+                    is ResultListEntry.ExpandToggle -> ExpandToggleRow(
+                        expanded = entry.expanded,
+                        totalPages = entry.totalPages,
+                        onToggle = {
+                            expandedDocIds = if (entry.docId in expandedDocIds) {
+                                expandedDocIds - entry.docId
+                            } else {
+                                expandedDocIds + entry.docId
+                            }
+                        },
+                    )
+                }
             }
         }
         if (isTruncated) {
-            item {
+            item(key = "truncated-footer") {
                 Text(
                     text = "Showing first 200 results, try a more specific query",
                     style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
@@ -475,6 +589,227 @@ private fun ResultList(
     }
 }
 
+@Composable
+private fun DocumentGroupHeader(
+    group: DocGroup,
+    onClick: () -> Unit,
+) {
+    val first = group.pages.first()
+    val totalHits = group.pages.sumOf { it.hitCount }
+    val matchesLabel = when {
+        totalHits == 1 -> "1 match"
+        totalHits > 1 -> "$totalHits matches"
+        group.pages.size == 1 -> "1 page"
+        else -> "${group.pages.size} pages"
+    }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp),
+        shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
+        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(width = 48.dp, height = 64.dp)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                PdfThumbnail(
+                    uriString = first.uri,
+                    pageIndex = first.pageNumber,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(8.dp)),
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = first.filename,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (first.folderName.isNotEmpty()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = first.folderName,
+                        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = matchesLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Terracotta,
+                        modifier = Modifier
+                            .background(Terracotta.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                    if (group.pages.any { it.isOcr }) {
+                        Text(
+                            text = "OCR",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 5.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PageMatchRow(
+    query: String,
+    result: SearchResult,
+    isLastInCard: Boolean,
+    onClick: () -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    var showMenu by remember { mutableStateOf(false) }
+
+    Box {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, bottom = if (isLastInCard) 6.dp else 0.dp),
+            shape = if (isLastInCard) {
+                RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp)
+            } else {
+                RoundedCornerShape(0.dp)
+            },
+            tonalElevation = 2.dp,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column {
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .combinedClickable(
+                            onClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onClick()
+                            },
+                            onLongClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                showMenu = true
+                            },
+                        )
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = "p. ${result.pageNumber + 1}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Terracotta,
+                        modifier = Modifier
+                            .background(Terracotta.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                    Text(
+                        text = buildHighlightedSnippet(
+                            query = query,
+                            snippet = result.snippet,
+                            highlightColor = AmberAccent.copy(alpha = 0.18f),
+                            highlightTextColor = MaterialTheme.colorScheme.onBackground,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        lineHeight = 19.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (result.hitCount > 1) {
+                        Text(
+                            text = "×${result.hitCount}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 5.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        SnippetContextMenu(
+            result = result,
+            expanded = showMenu,
+            onDismiss = { showMenu = false },
+            onOpen = onClick,
+        )
+    }
+}
+
+@Composable
+private fun ExpandToggleRow(
+    expanded: Boolean,
+    totalPages: Int,
+    onToggle: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp),
+        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column {
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 12.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+            )
+            Text(
+                text = if (expanded) "Show fewer pages" else "Show all $totalPages pages",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggle)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ResultRow(
@@ -482,7 +817,6 @@ fun ResultRow(
     result: SearchResult,
     onClick: () -> Unit = {},
 ) {
-    val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var showMenu by remember { mutableStateOf(false) }
 
@@ -545,10 +879,10 @@ fun ResultRow(
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.SemiBold,
-                            color = AmberAccent,
+                            color = Terracotta,
                             modifier = Modifier
                                 .padding(start = 8.dp)
-                                .background(AmberAccent.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+                                .background(Terracotta.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                         )
                     }
@@ -601,48 +935,64 @@ fun ResultRow(
             }
         }
 
-        DropdownMenu(
+        SnippetContextMenu(
+            result = result,
             expanded = showMenu,
-            onDismissRequest = { showMenu = false },
-        ) {
-            DropdownMenuItem(
-                text = { Text("Open at page ${result.pageNumber + 1}") },
-                leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null, modifier = Modifier.size(18.dp)) },
-                onClick = {
-                    showMenu = false
-                    onClick()
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Copy snippet") },
-                leadingIcon = { Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(18.dp)) },
-                onClick = {
-                    showMenu = false
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("Lumen snippet", result.snippet))
-                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                        Toast.makeText(context, "Snippet copied", Toast.LENGTH_SHORT).show()
-                    }
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Share") },
-                leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
-                onClick = {
-                    showMenu = false
-                    val text = "${result.filename} · p.${result.pageNumber + 1}\n\n${result.snippet}"
-                    context.startActivity(
-                        Intent.createChooser(
-                            Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, text)
-                            },
-                            "Share snippet"
-                        )
+            onDismiss = { showMenu = false },
+            onOpen = onClick,
+        )
+    }
+}
+
+@Composable
+private fun SnippetContextMenu(
+    result: SearchResult,
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onOpen: () -> Unit,
+) {
+    val context = LocalContext.current
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+    ) {
+        DropdownMenuItem(
+            text = { Text("Open at page ${result.pageNumber + 1}") },
+            leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null, modifier = Modifier.size(18.dp)) },
+            onClick = {
+                onDismiss()
+                onOpen()
+            },
+        )
+        DropdownMenuItem(
+            text = { Text("Copy snippet") },
+            leadingIcon = { Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(18.dp)) },
+            onClick = {
+                onDismiss()
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Lumen snippet", result.snippet))
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    Toast.makeText(context, "Snippet copied", Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+        DropdownMenuItem(
+            text = { Text("Share") },
+            leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
+            onClick = {
+                onDismiss()
+                val text = "${result.filename} · p.${result.pageNumber + 1}\n\n${result.snippet}"
+                context.startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, text)
+                        },
+                        "Share snippet"
                     )
-                },
-            )
-        }
+                )
+            },
+        )
     }
 }
 
@@ -662,7 +1012,19 @@ private fun SearchFilterSheet(
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Search filters", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Search filters", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                TextButton(
+                    onClick = { onFiltersChange(SearchFilters()) },
+                    enabled = filters != SearchFilters(),
+                ) {
+                    Text("Reset", fontWeight = FontWeight.SemiBold)
+                }
+            }
 
             if (availableFolders.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -670,7 +1032,7 @@ private fun SearchFilterSheet(
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         availableFolders.forEach { uri ->
                             val folderId = folderIdFromTreeUri(uri)
-                            val label = uri.lastPathSegment ?: uri.toString()
+                            val label = folderDisplayName(uri)
                             FilterChip(
                                 selected = folderId in filters.folderIds,
                                 onClick = {
@@ -681,6 +1043,21 @@ private fun SearchFilterSheet(
                                 label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             )
                         }
+                    }
+                }
+            }
+
+            HorizontalDivider()
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Indexed", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IndexedWithin.entries.forEach { option ->
+                        FilterChip(
+                            selected = filters.indexedWithin == option,
+                            onClick = { onFiltersChange(filters.copy(indexedWithin = option)) },
+                            label = { Text(option.displayName) },
+                        )
                     }
                 }
             }
@@ -723,14 +1100,6 @@ private fun SearchFilterSheet(
                 }
             }
 
-            if (filters != SearchFilters()) {
-                OutlinedButton(
-                    onClick = { onFiltersChange(SearchFilters()) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Reset filters")
-                }
-            }
         }
     }
 }
@@ -739,7 +1108,8 @@ private fun folderIdFromTreeUri(uri: Uri): String =
     runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrDefault(uri.toString())
 
 private fun folderLabel(folderId: String, availableFolders: Set<Uri>): String =
-    availableFolders.firstOrNull { folderIdFromTreeUri(it) == folderId }?.lastPathSegment ?: folderId
+    availableFolders.firstOrNull { folderIdFromTreeUri(it) == folderId }
+        ?.let { folderDisplayName(it) } ?: folderId
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -749,6 +1119,7 @@ private fun ActiveFiltersRow(
     onRemoveFolder: (String) -> Unit,
     onToggleOcrOnly: () -> Unit,
     onResetSort: () -> Unit,
+    onResetIndexedWithin: () -> Unit,
     onClearAll: () -> Unit,
 ) {
     if (filters == SearchFilters()) return
@@ -785,6 +1156,14 @@ private fun ActiveFiltersRow(
             )
         }
 
+        if (filters.indexedWithin != IndexedWithin.ANY_TIME) {
+            FilterChip(
+                selected = true,
+                onClick = onResetIndexedWithin,
+                label = { Text("Indexed: ${filters.indexedWithin.displayName}") },
+            )
+        }
+
         FilterChip(
             selected = false,
             onClick = onClearAll,
@@ -796,13 +1175,19 @@ private fun ActiveFiltersRow(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SearchEmptyState(
-    indexedCount: Int,
+    indexedCount: Int?,
     recentSearches: List<String>,
     recentDocuments: List<DocumentEntity>,
     onSelectRecentSearch: (String) -> Unit,
     onOpenDocument: (DocumentEntity) -> Unit,
     onOpenLibrary: () -> Unit,
 ) {
+    // Count not loaded yet — render nothing rather than flashing the
+    // "Nothing indexed" prompt at a user whose library is full.
+    if (indexedCount == null) {
+        Box(modifier = Modifier.fillMaxSize())
+        return
+    }
     // Nothing indexed yet — keep the original onboarding-style prompt.
     if (indexedCount == 0) {
         Column(
@@ -943,7 +1328,35 @@ private fun RecentDocumentRow(doc: DocumentEntity, onClick: () -> Unit) {
 }
 
 @Composable
-private fun NoResultsState(query: String, onOpenLibrary: () -> Unit, onClearQuery: () -> Unit) {
+private fun SearchErrorState() {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            "Search failed",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Something went wrong while searching the index. Edit the query to try again.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun NoResultsState(
+    query: String,
+    hasActiveFilters: Boolean,
+    onOpenLibrary: () -> Unit,
+    onClearQuery: () -> Unit,
+    onClearFilters: () -> Unit,
+) {
     Column(
         modifier = Modifier.fillMaxSize().padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -961,10 +1374,27 @@ private fun NoResultsState(query: String, onOpenLibrary: () -> Unit, onClearQuer
         Text("No results for “$query”", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(8.dp))
         Text("Try a different word, or check that the folder is indexed", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
+        if (hasActiveFilters) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Filters are active and may be hiding matches.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Terracotta,
+            )
+        }
         Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onClearQuery) { Text("Clear search") }
-            Button(onClick = onOpenLibrary) { Text("Open library") }
+        // FlowRow, not Row: with the filter button visible all three can't fit on
+        // one line, and a plain Row crushes the last button until its label
+        // wraps letter-by-letter.
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+        ) {
+            if (hasActiveFilters) {
+                OutlinedButton(onClick = onClearFilters) { Text("Clear filters", maxLines = 1) }
+            }
+            OutlinedButton(onClick = onClearQuery) { Text("Clear search", maxLines = 1) }
+            Button(onClick = onOpenLibrary) { Text("Open library", maxLines = 1) }
         }
     }
 }

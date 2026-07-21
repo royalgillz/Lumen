@@ -19,10 +19,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.artifex.mupdf.fitz.ColorSpace
 import com.artifex.mupdf.fitz.Matrix
+import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import com.lumen.app.data.pdf.MuPdfGate
-import com.lumen.app.data.pdf.pixmapToBitmap
 import com.lumen.app.data.pdf.withMuPdfDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -34,9 +33,19 @@ fun PdfThumbnail(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val bitmapState = produceState<Bitmap?>(initialValue = null, uriString, pageIndex) {
+    val cacheKey = ThumbnailCache.key(uriString, pageIndex)
+    val bitmapState = produceState<Bitmap?>(initialValue = ThumbnailCache.get(cacheKey), uriString, pageIndex) {
+        // produceState's backing state is not keyed — after a key change it still
+        // holds the previous document's bitmap, so re-resolve from the cache here
+        // rather than trusting `value`.
+        val cached = ThumbnailCache.get(cacheKey)
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
+        value = null
         val parsed = runCatching { Uri.parse(uriString) }.getOrNull()
-        value = if (parsed == null) null else withContext(Dispatchers.IO) {
+        val rendered = if (parsed == null) null else withContext(Dispatchers.IO) {
             withMuPdfDocument(context, parsed) { doc ->
                 val count = doc.countPages()
                 if (count <= 0) return@withMuPdfDocument null
@@ -51,24 +60,18 @@ fun PdfThumbnail(
                     val targetPx = 96f
                     val scale = (targetPx / pageWidthPts).coerceAtLeast(0.01f)
                     val matrix = Matrix(scale, scale)
-                    // Share the global render permit; render WITH alpha and let
-                    // pixmapToBitmap composite over white so soft-masked icons don't
-                    // collapse into solid colour blocks.
+                    // Share the global render permit; AndroidDrawDevice renders
+                    // natively onto opaque white (see MuPdfPageRenderer.renderPage).
                     MuPdfGate.withRenderPermit {
-                        val pixmap = runCatching {
-                            page.toPixmap(matrix, ColorSpace.DeviceRGB, true)
-                        }.getOrNull() ?: return@withRenderPermit null
-                        try {
-                            pixmapToBitmap(pixmap)
-                        } finally {
-                            runCatching { pixmap.destroy() }
-                        }
+                        runCatching { AndroidDrawDevice.drawPage(page, matrix) }.getOrNull()
                     }
                 } finally {
                     runCatching { page.destroy() }
                 }
             }
         }
+        if (rendered != null) ThumbnailCache.put(cacheKey, rendered)
+        value = rendered
     }
 
     if (bitmapState.value != null) {

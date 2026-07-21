@@ -175,6 +175,8 @@ private fun PrivacyAuditCard() {
             PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "No analytics or crash reporting", "No Firebase, Sentry, or any SDK that phones home.", isGood = true)
             PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "Files read in-place", "PDFs are never copied into app storage.", isGood = true)
             PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "Index stored on-device only", "Full-text index lives in a local SQLite database.", isGood = true)
+            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "OCR languages", "OCR recognises Latin-script text fully on-device. Other scripts aren't supported yet.", isGood = true)
+            PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "Backups", "Your search index never leaves this device and is excluded from system backups. After moving to a new phone, re-add your folders to rebuild it.", isGood = true)
             PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "AGPL source availability", "Source code available at github.com/royalgillz/Lumen", isGood = true)
         }
     }

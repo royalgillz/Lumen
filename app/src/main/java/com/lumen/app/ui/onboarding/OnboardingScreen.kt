@@ -1,6 +1,7 @@
 package com.lumen.app.ui.onboarding
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -41,6 +42,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,9 +86,14 @@ fun OnboardingScreen(
     onFinished: () -> Unit,
     viewModel: OnboardingViewModel = hiltViewModel(),
 ) {
-    var currentPage by remember { mutableIntStateOf(0) }
+    var currentPage by rememberSaveable { mutableIntStateOf(0) }
     val selectedFolder by viewModel.selectedFolder.collectAsState()
     val isIndexing by viewModel.isIndexing.collectAsState()
+    val indexingProgress by viewModel.indexingProgress.collectAsState()
+
+    // System Back steps one page back, matching the horizontal-drag affordance,
+    // instead of exiting the app from page 2/3.
+    BackHandler(enabled = currentPage > 0) { currentPage-- }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -143,7 +150,12 @@ fun OnboardingScreen(
             },
             label = "onboarding_page",
         ) { page ->
-            PageContent(pages[page], currentPage = page)
+            PageContent(
+                pages[page],
+                currentPage = page,
+                isIndexing = isIndexing,
+                indexingProgress = indexingProgress,
+            )
         }
 
         Spacer(Modifier.weight(1f))
@@ -240,7 +252,12 @@ fun OnboardingScreen(
 }
 
 @Composable
-private fun PageContent(page: OnboardingPage, currentPage: Int) {
+private fun PageContent(
+    page: OnboardingPage,
+    currentPage: Int,
+    isIndexing: Boolean = false,
+    indexingProgress: Pair<Int, Int>? = null,
+) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.padding(horizontal = 8.dp),
@@ -312,17 +329,46 @@ private fun PageContent(page: OnboardingPage, currentPage: Int) {
 
         if (currentPage == 2) {
             Spacer(Modifier.height(12.dp))
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.primary,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "Found PDFs are indexed in the background.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // Real progress, not decoration: determinate when the worker reports,
+            // indeterminate while it spins up, and no bar before indexing starts.
+            val progress = indexingProgress
+            when {
+                progress != null -> {
+                    val (done, total) = progress
+                    LinearProgressIndicator(
+                        progress = { (done + 1).toFloat() / total },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Indexing ${done + 1} of $total PDFs…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                isIndexing -> {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Indexing your PDFs…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                else -> {
+                    Text(
+                        text = "Indexing starts when you tap Start searching.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 }

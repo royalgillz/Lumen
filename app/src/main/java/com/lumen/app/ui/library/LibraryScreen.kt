@@ -45,7 +45,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -58,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,7 +75,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
-import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 import java.util.concurrent.TimeUnit
@@ -83,8 +86,15 @@ fun LibraryScreen(
     viewModel: LibraryViewModel = hiltViewModel(),
     onOpenDocument: (uri: String, filename: String) -> Unit = { _, _ -> },
 ) {
-    val documents by viewModel.documents.collectAsState()
-    val folders by viewModel.folders.collectAsState()
+    val documentsOrNull by viewModel.documents.collectAsState()
+    val foldersOrNull by viewModel.folders.collectAsState()
+    val pendingRemovals by viewModel.pendingRemovals.collectAsState()
+    val isContentLoaded = documentsOrNull != null && foldersOrNull != null
+    // Folders awaiting Undo-expiry are hidden (along with their documents) so the
+    // list reflects the removal immediately while it can still be undone.
+    val pendingTreeUris = remember(pendingRemovals) { pendingRemovals.map { it.toString() }.toSet() }
+    val documents = documentsOrNull.orEmpty().filter { it.treeUri !in pendingTreeUris }
+    val folders = foldersOrNull.orEmpty() - pendingRemovals
     val isIndexing by viewModel.isIndexing.collectAsState()
     val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
     val totalPages by viewModel.totalPages.collectAsState()
@@ -95,7 +105,7 @@ fun LibraryScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    var gridMode by remember { mutableStateOf(true) }
+    var gridMode by rememberSaveable { mutableStateOf(true) }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -110,9 +120,10 @@ fun LibraryScreen(
                 doc = selectedDocument!!,
                 ocrPageCount = selectedDocOcrPages,
                 onReindex = {
-                    val treeUri = selectedDocument!!.treeUri
-                        .takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
-                    if (treeUri != null) viewModel.reindexFolder(treeUri)
+                    // Re-index THIS document only: reset its status and enqueue a
+                    // non-force pass, which skips unchanged neighbours. The old
+                    // behaviour force-reindexed the whole folder.
+                    selectedDocument?.let { viewModel.retryDocument(it) }
                     viewModel.hideDocumentDetail()
                 },
                 onOpenPdf = {
@@ -165,12 +176,12 @@ fun LibraryScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(AmberAccent.copy(alpha = 0.15f))
+                        .background(Terracotta.copy(alpha = 0.15f))
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Icon(Icons.Default.Warning, contentDescription = null, tint = AmberAccent, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Terracotta, modifier = Modifier.size(18.dp))
                     Text(
                         text = "${lostPermissionFolders.size} folder${if (lostPermissionFolders.size > 1) "s" else ""} " +
                             "lost access, remove and re-add using + Add Folder.",
@@ -181,7 +192,10 @@ fun LibraryScreen(
                 }
             }
 
-            if (folders.isEmpty() && documents.isEmpty()) {
+            if (!isContentLoaded) {
+                // First load still in flight — render nothing rather than flashing
+                // the "No folders added yet" state at a populated library.
+            } else if (folders.isEmpty() && documents.isEmpty()) {
                 LibraryEmptyState(onAdd = { folderPickerLauncher.launch(null) })
             } else {
                 LibraryStats(
@@ -200,8 +214,19 @@ fun LibraryScreen(
                                 uri = uri,
                                 hasLostPermission = uri in lostPermissionFolders,
                                 onRemove = {
-                                    viewModel.removeFolder(uri)
-                                    scope.launch { snackbarHostState.showSnackbar("Folder removed") }
+                                    viewModel.requestRemoveFolder(uri)
+                                    scope.launch {
+                                        val res = snackbarHostState.showSnackbar(
+                                            message = "Folder removed",
+                                            actionLabel = "Undo",
+                                            duration = SnackbarDuration.Long,
+                                        )
+                                        if (res == SnackbarResult.ActionPerformed) {
+                                            viewModel.undoRemoveFolder(uri)
+                                        } else {
+                                            viewModel.commitRemoveFolder(uri)
+                                        }
+                                    }
                                 },
                                 onReindex = { viewModel.reindexFolder(uri) },
                             )
@@ -425,7 +450,7 @@ private fun StatItem(count: Int, label: String, useAccent: Boolean = false) {
             text = count.toString(),
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
-            color = if (useAccent) AmberAccent else MaterialTheme.colorScheme.onSurface,
+            color = if (useAccent) Terracotta else MaterialTheme.colorScheme.onSurface,
         )
         Text(text = label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -580,7 +605,7 @@ private fun FolderRow(
             Icon(
                 if (hasLostPermission) Icons.Default.Warning else Icons.Default.FolderOpen,
                 contentDescription = null,
-                tint = if (hasLostPermission) AmberAccent else MaterialTheme.colorScheme.primary,
+                tint = if (hasLostPermission) Terracotta else MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(24.dp),
             )
             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -594,7 +619,7 @@ private fun FolderRow(
                     Text(
                         text = "Permission lost, remove and re-add",
                         style = MaterialTheme.typography.labelSmall,
-                        color = AmberAccent,
+                        color = Terracotta,
                     )
                 }
             }
@@ -667,7 +692,7 @@ private fun DocumentGridCard(
     val statusColor = when (doc.status) {
         DocumentEntity.STATUS_INDEXED -> MaterialTheme.colorScheme.primary
         DocumentEntity.STATUS_ERROR -> MaterialTheme.colorScheme.error
-        DocumentEntity.STATUS_ENCRYPTED -> AmberAccent
+        DocumentEntity.STATUS_ENCRYPTED -> Terracotta
         else -> MaterialTheme.colorScheme.outline
     }
     Surface(
