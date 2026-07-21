@@ -4,9 +4,11 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lumen.app.data.db.dao.BookmarkDao
 import com.lumen.app.data.db.dao.DocumentDao
 import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.db.dao.PageTextDao
+import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.db.entity.PageEntity
 import com.lumen.app.data.db.entity.PageTextEntity
@@ -18,14 +20,16 @@ import com.lumen.app.data.db.entity.PageTextFtsEntity
         PageEntity::class,
         PageTextEntity::class,
         PageTextFtsEntity::class,
+        BookmarkEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class LumenDatabase : RoomDatabase() {
     abstract fun documentDao(): DocumentDao
     abstract fun pageDao(): PageDao
     abstract fun pageTextDao(): PageTextDao
+    abstract fun bookmarkDao(): BookmarkDao
 
     companion object {
         val MIGRATION_3_4 = object : Migration(3, 4) {
@@ -79,6 +83,25 @@ abstract class LumenDatabase : RoomDatabase() {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("DROP TABLE IF EXISTS `lines_fts`")
                 database.execSQL("DROP TABLE IF EXISTS `lines`")
+            }
+        }
+
+        // Reader bookmarks. Purely additive; keyed by document URI so they work
+        // for never-indexed documents and survive index deletion.
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `bookmarks` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`docUri` TEXT NOT NULL, " +
+                        "`pageNumber` INTEGER NOT NULL, " +
+                        "`note` TEXT, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+                database.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_bookmarks_docUri_pageNumber` " +
+                        "ON `bookmarks` (`docUri`, `pageNumber`)"
+                )
             }
         }
     }

@@ -72,6 +72,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
@@ -84,7 +85,7 @@ import java.util.concurrent.TimeUnit
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel = hiltViewModel(),
-    onOpenDocument: (uri: String, filename: String) -> Unit = { _, _ -> },
+    onOpenDocument: (uri: String, filename: String, page: Int) -> Unit = { _, _, _ -> },
 ) {
     val documentsOrNull by viewModel.documents.collectAsState()
     val foldersOrNull by viewModel.folders.collectAsState()
@@ -102,6 +103,7 @@ fun LibraryScreen(
     val ocrPages by viewModel.ocrPages.collectAsState()
     val selectedDocument by viewModel.selectedDocument.collectAsState()
     val selectedDocOcrPages by viewModel.selectedDocOcrPages.collectAsState()
+    val selectedDocBookmarks by viewModel.selectedDocBookmarks.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -119,6 +121,7 @@ fun LibraryScreen(
             DocumentDetailSheet(
                 doc = selectedDocument!!,
                 ocrPageCount = selectedDocOcrPages,
+                bookmarks = selectedDocBookmarks,
                 onReindex = {
                     // Re-index THIS document only: reset its status and enqueue a
                     // non-force pass, which skips unchanged neighbours. The old
@@ -128,7 +131,12 @@ fun LibraryScreen(
                 },
                 onOpenPdf = {
                     val doc = selectedDocument ?: return@DocumentDetailSheet
-                    onOpenDocument(doc.uri, doc.filename)
+                    onOpenDocument(doc.uri, doc.filename, 0)
+                    viewModel.hideDocumentDetail()
+                },
+                onOpenAtPage = { page ->
+                    val doc = selectedDocument ?: return@DocumentDetailSheet
+                    onOpenDocument(doc.uri, doc.filename, page)
                     viewModel.hideDocumentDetail()
                 },
                 onDismiss = { viewModel.hideDocumentDetail() },
@@ -242,7 +250,7 @@ fun LibraryScreen(
                                 ErrorCenterCard(
                                     documents = failedOrEncrypted,
                                     onRetry = { doc -> viewModel.retryDocument(doc) },
-                                    onOpen = { doc -> onOpenDocument(doc.uri, doc.filename) },
+                                    onOpen = { doc -> onOpenDocument(doc.uri, doc.filename, 0) },
                                 )
                             }
                         }
@@ -768,8 +776,10 @@ private fun statusLabel(doc: DocumentEntity): String {
 private fun DocumentDetailSheet(
     doc: DocumentEntity,
     ocrPageCount: Int,
+    bookmarks: List<BookmarkEntity>,
     onReindex: () -> Unit,
     onOpenPdf: () -> Unit,
+    onOpenAtPage: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
     Column(
@@ -812,6 +822,58 @@ private fun DocumentDetailSheet(
             DetailRow("Indexed", java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault()).format(java.util.Date(doc.indexedAt)))
         }
         DetailRow("Added", java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault()).format(java.util.Date(doc.addedAt)))
+
+        if (bookmarks.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Bookmarks (${bookmarks.size})",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            val dateFormat = java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault())
+            bookmarks.forEach { bm ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenAtPage(bm.pageNumber) }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Text(
+                            "p. ${bm.pageNumber + 1}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        bm.note?.takeIf { it.isNotBlank() }?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Text(
+                            dateFormat.format(java.util.Date(bm.createdAt)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
 
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

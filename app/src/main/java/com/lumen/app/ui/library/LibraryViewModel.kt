@@ -6,7 +6,9 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.lumen.app.data.db.dao.BookmarkDao
 import com.lumen.app.data.db.dao.PageDao
+import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.repository.LibraryRepository
 import com.lumen.app.di.ApplicationScope
@@ -16,10 +18,13 @@ import com.lumen.app.worker.IndexWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -33,6 +38,7 @@ class LibraryViewModel @Inject constructor(
     private val removeFolderUseCase: RemoveFolderUseCase,
     private val workManager: WorkManager,
     private val pageDao: PageDao,
+    private val bookmarkDao: BookmarkDao,
     @ApplicationScope private val appScope: CoroutineScope,
 ) : ViewModel() {
 
@@ -73,6 +79,13 @@ class LibraryViewModel @Inject constructor(
 
     private val _selectedDocOcrPages = MutableStateFlow(0)
     val selectedDocOcrPages: StateFlow<Int> = _selectedDocOcrPages
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val selectedDocBookmarks: StateFlow<List<BookmarkEntity>> = selectedDocument
+        .flatMapLatest { doc ->
+            if (doc == null) flowOf(emptyList()) else bookmarkDao.observeForDocument(doc.uri)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {
         viewModelScope.launch {

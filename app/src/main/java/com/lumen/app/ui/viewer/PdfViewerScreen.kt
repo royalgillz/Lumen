@@ -17,10 +17,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,10 +43,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.BrightnessLow
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Download
@@ -59,12 +67,15 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -104,6 +115,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -111,6 +123,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PdfViewerScreen(
     uri: String,
@@ -135,6 +148,8 @@ fun PdfViewerScreen(
     val activePage by viewModel.activePage.collectAsState()
     val activeRectIndexOnPage by viewModel.activeRectIndexOnPage.collectAsState()
     val pageHighlights by viewModel.pageHighlights.collectAsState()
+    val bookmarks by viewModel.bookmarks.collectAsState()
+    val isScanningFallback by viewModel.isScanningFallback.collectAsState()
 
     // ── Viewer-only Compose state ─────────────────────────────────────────────
     // After rotation the ViewModel remembers where the reader actually was; only a
@@ -163,6 +178,9 @@ fun PdfViewerScreen(
     var resumePromptShown by rememberSaveable { mutableStateOf(false) }
     var showBrightnessSlider by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
+    var showBookmarksSheet by remember { mutableStateOf(false) }
+    var noteDialogBookmarkId by remember { mutableStateOf<Long?>(null) }
+    var noteDialogText by remember { mutableStateOf("") }
     // Seed from the system brightness so opening the slider doesn't jump the
     // screen to an arbitrary 50%; the override only applies once the user drags.
     val systemBrightness = remember {
@@ -332,6 +350,31 @@ fun PdfViewerScreen(
         }
     }
 
+    // Bookmark add/remove feedback. Added offers a jump into the optional note.
+    LaunchedEffect(Unit) {
+        viewModel.bookmarkEvents.collect { event ->
+            when (event) {
+                is PdfViewerViewModel.BookmarkEvent.Added -> {
+                    val result = snackbarHostState.showSnackbar(
+                        message = "Bookmarked p. ${event.page + 1}",
+                        actionLabel = "Add note",
+                        duration = SnackbarDuration.Short,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        noteDialogText = ""
+                        noteDialogBookmarkId = event.id
+                    }
+                }
+                is PdfViewerViewModel.BookmarkEvent.Removed -> {
+                    snackbarHostState.showSnackbar(
+                        message = "Bookmark removed",
+                        duration = SnackbarDuration.Short,
+                    )
+                }
+            }
+        }
+    }
+
     // Bring a match's page into view on explicit search actions only. Event-based:
     // keying on activePage state re-jumped the view on every recomposition-restart
     // (e.g. rotation), losing the reader's position.
@@ -455,6 +498,47 @@ fun PdfViewerScreen(
             dismissButton = {
                 TextButton(onClick = { showPageJump = false; pageJumpInput = "" }) { Text("Cancel") }
             },
+        )
+    }
+
+    val editingBookmarkId = noteDialogBookmarkId
+    if (editingBookmarkId != null) {
+        AlertDialog(
+            onDismissRequest = { noteDialogBookmarkId = null },
+            title = { Text("Bookmark note") },
+            text = {
+                TextField(
+                    value = noteDialogText,
+                    onValueChange = { noteDialogText = it },
+                    label = { Text("Note (optional)") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.setBookmarkNote(editingBookmarkId, noteDialogText)
+                    noteDialogBookmarkId = null
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { noteDialogBookmarkId = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showBookmarksSheet) {
+        BookmarksSheet(
+            bookmarks = bookmarks,
+            onJump = { page ->
+                showBookmarksSheet = false
+                pdfDocView.value?.jumpToPage(page, animate = true)
+            },
+            onDelete = { viewModel.deleteBookmark(it) },
+            onEditNote = { bm ->
+                noteDialogText = bm.note.orEmpty()
+                noteDialogBookmarkId = bm.id
+            },
+            onDismiss = { showBookmarksSheet = false },
         )
     }
 
@@ -677,6 +761,18 @@ fun PdfViewerScreen(
                                 )
                             }
                         }
+                        val currentPageBookmarked = bookmarks.any { it.pageNumber == displayPage.intValue }
+                        IconButton(onClick = {
+                            viewModel.toggleBookmark(displayPage.intValue)
+                            showControls = true
+                            controlsTouchTick++
+                        }) {
+                            Icon(
+                                imageVector = if (currentPageBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                contentDescription = if (currentPageBookmarked) "Remove bookmark" else "Bookmark this page",
+                                tint = if (currentPageBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
                         IconButton(onClick = {
                             isViewerSearchActive = !isViewerSearchActive
                             if (!isViewerSearchActive) {
@@ -744,6 +840,15 @@ fun PdfViewerScreen(
                                     onClick = {
                                         showOverflowMenu = false
                                         showPageJump = true
+                                        controlsTouchTick++
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Bookmarks") },
+                                    leadingIcon = { Icon(Icons.Default.Bookmarks, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showBookmarksSheet = true
                                         controlsTouchTick++
                                     },
                                 )
@@ -842,6 +947,13 @@ fun PdfViewerScreen(
                             } else if (viewerSearchQuery.length in 1..1) {
                                 Text(
                                     "Type at least 2 letters",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                )
+                            } else if (isScanningFallback) {
+                                Text(
+                                    "Searching…",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 8.dp),
@@ -969,6 +1081,94 @@ private fun sharePdf(
         onError()
     } catch (_: SecurityException) {
         onError()
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+private fun BookmarksSheet(
+    bookmarks: List<BookmarkEntity>,
+    onJump: (Int) -> Unit,
+    onDelete: (Long) -> Unit,
+    onEditNote: (BookmarkEntity) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.padding(bottom = 28.dp)) {
+            Text(
+                "Bookmarks",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+            if (bookmarks.isEmpty()) {
+                Text(
+                    "No bookmarks yet. Tap the bookmark icon in the top bar to mark the current page.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+            } else {
+                val dateFormat = remember {
+                    java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault())
+                }
+                LazyColumn {
+                    items(bookmarks, key = { it.id }) { bm ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = { onJump(bm.pageNumber) },
+                                    onLongClick = { onEditNote(bm) },
+                                )
+                                .padding(horizontal = 20.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                                shape = RoundedCornerShape(8.dp),
+                            ) {
+                                Text(
+                                    "p. ${bm.pageNumber + 1}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = bm.note?.takeIf { it.isNotBlank() } ?: "No note — long-press to add",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (bm.note.isNullOrBlank()) {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = dateFormat.format(java.util.Date(bm.createdAt)),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            IconButton(onClick = { onDelete(bm.id) }) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = "Delete bookmark on page ${bm.pageNumber + 1}",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

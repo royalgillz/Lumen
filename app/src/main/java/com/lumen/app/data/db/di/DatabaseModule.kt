@@ -25,6 +25,7 @@ object DatabaseModule {
                 LumenDatabase.MIGRATION_4_5,
                 LumenDatabase.MIGRATION_5_6,
                 LumenDatabase.MIGRATION_6_7,
+                LumenDatabase.MIGRATION_7_8,
             )
             .fallbackToDestructiveMigration(true)
             .addCallback(object : RoomDatabase.Callback() {
@@ -42,4 +43,7 @@ object DatabaseModule {
 
     @Provides
     fun providePageTextDao(db: LumenDatabase) = db.pageTextDao()
+
+    @Provides
+    fun provideBookmarkDao(db: LumenDatabase) = db.bookmarkDao()
 }

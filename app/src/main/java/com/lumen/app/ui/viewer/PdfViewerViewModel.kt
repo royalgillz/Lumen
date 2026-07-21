@@ -6,7 +6,11 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lumen.app.data.db.FtsQuerySanitizer
+import com.lumen.app.data.db.dao.BookmarkDao
+import com.lumen.app.data.db.dao.DocumentDao
 import com.lumen.app.data.db.dao.PageDao
+import com.lumen.app.data.db.entity.BookmarkEntity
+import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.ocr.OcrWordBoxes
 import com.lumen.app.data.pdf.PdfHighlighter
@@ -15,8 +19,11 @@ import com.lumen.app.di.ApplicationScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -26,6 +33,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -37,6 +46,8 @@ class PdfViewerViewModel @Inject constructor(
     private val searchRepository: SearchRepository,
     private val safRepository: SafRepository,
     private val pageDao: PageDao,
+    private val documentDao: DocumentDao,
+    private val bookmarkDao: BookmarkDao,
     @ApplicationScope private val appScope: CoroutineScope,
 ) : AndroidViewModel(application) {
 
@@ -65,6 +76,9 @@ class PdfViewerViewModel @Inject constructor(
     private var currentRenderer: MuPdfPageRenderer? = null
     private var lastOpenedUri: String? = null
     private var lastOpenedPassword: String? = null
+
+    /** URI of the open document as observable state, driving the bookmarks flow. */
+    private val openedUri = MutableStateFlow<String?>(null)
 
     /**
      * The page saved from a previous session, captured once per document open
@@ -105,6 +119,7 @@ class PdfViewerViewModel @Inject constructor(
         }
         lastOpenedUri = uriString
         lastOpenedPassword = password
+        openedUri.value = uriString
         _documentState.value = DocumentState.Loading
         openJob = viewModelScope.launch(Dispatchers.IO) {
             if (resumePage == null) resumePage = safRepository.getLastPage(uriString) ?: -1
@@ -257,8 +272,18 @@ class PdfViewerViewModel @Inject constructor(
             _occurrenceOrdinal.value = 0
             _matchPages.value = pages
             if (pages.isEmpty()) {
-                _activePage.value = -1
-                _activeRectIndexOnPage.value = -1
+                // The FTS index knows nothing about documents that were never
+                // indexed — opened directly via a VIEW intent (e.g. a mail
+                // attachment), or encrypted/errored at index time. For those, fall
+                // back to scanning the open document's text page by page.
+                val scanned = if (isSearchableInIndex(docUri)) emptyList() else scanOpenDocument(trimmed)
+                if (scanned.isEmpty()) {
+                    _activePage.value = -1
+                    _activeRectIndexOnPage.value = -1
+                    return@launch
+                }
+                recompute()
+                startCountPass()
                 return@launch
             }
             // Land on the first occurrence at/after the preferred page (wrapping),
@@ -288,6 +313,57 @@ class PdfViewerViewModel @Inject constructor(
             recompute()
             startCountPass()
         }
+    }
+
+    /** True while the fallback page-by-page scan is running, so the UI can show
+     *  "Searching…" instead of a premature "No matches". */
+    private val _isScanningFallback = MutableStateFlow(false)
+    val isScanningFallback: StateFlow<Boolean> = _isScanningFallback.asStateFlow()
+
+    /** A document only trusts the FTS index for search when it finished indexing;
+     *  missing or encrypted/errored documents get the fallback scan. */
+    private suspend fun isSearchableInIndex(docUri: String): Boolean {
+        val doc = runCatching { documentDao.getByUri(docUri) }.getOrNull()
+        return doc != null && doc.status == DocumentEntity.STATUS_INDEXED
+    }
+
+    /**
+     * Fallback in-document search for unindexed documents: walk every page's
+     * MuPDF structured text with token-AND matching (mirroring FTS semantics —
+     * every query token somewhere on the page). Publishes match pages
+     * progressively and lands on the first match as soon as it's found, so the
+     * reader isn't waiting on a full scan of a large file. Scanned pages without
+     * a text layer yield no words and simply never match.
+     */
+    private suspend fun scanOpenDocument(keyword: String): List<Int> {
+        val renderer = currentRenderer ?: return emptyList()
+        val needles = keyword.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (needles.isEmpty()) return emptyList()
+        val found = mutableListOf<Int>()
+        _isScanningFallback.value = true
+        try {
+            for (p in 0 until renderer.pageCount) {
+                currentCoroutineContext().ensureActive()
+                val words = runCatching { renderer.wordsForPage(p) }.getOrNull().orEmpty()
+                if (words.isEmpty()) continue
+                val matches = needles.all { n -> words.any { it.text.lowercase().contains(n) } }
+                if (!matches) continue
+                found += p
+                _matchPages.value = found.toList()
+                if (found.size == 1) {
+                    // Land immediately on the first hit while the scan continues.
+                    val n = rectsFor(p).rects.size
+                    _activePage.value = p
+                    _activeRectIndexOnPage.value = if (n > 0) 0 else -1
+                    _scrollToPage.tryEmit(p)
+                    recompute()
+                }
+                if (found.size >= MAX_MATCH_PAGES) break
+            }
+        } finally {
+            _isScanningFallback.value = false
+        }
+        return found
     }
 
     /**
@@ -496,6 +572,53 @@ class PdfViewerViewModel @Inject constructor(
         viewModelScope.launch {
             safRepository.setViewerScrollHorizontal(!scrollHorizontal.value)
         }
+    }
+
+    // ── Bookmarks ─────────────────────────────────────────────────────────────
+
+    sealed class BookmarkEvent {
+        data class Added(val id: Long, val page: Int) : BookmarkEvent()
+        data class Removed(val page: Int) : BookmarkEvent()
+    }
+
+    /** One-shot add/remove notifications driving the snackbar ("Bookmarked p. N —
+     *  Add note"). Events, not state: replaying on rotation would re-show it. */
+    private val _bookmarkEvents = MutableSharedFlow<BookmarkEvent>(extraBufferCapacity = 4)
+    val bookmarkEvents: SharedFlow<BookmarkEvent> = _bookmarkEvents.asSharedFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val bookmarks: StateFlow<List<BookmarkEntity>> = openedUri
+        .flatMapLatest { uri ->
+            if (uri == null) flowOf(emptyList()) else bookmarkDao.observeForDocument(uri)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Toggle a bookmark on [page]: adds when absent, removes when present. */
+    fun toggleBookmark(page: Int) {
+        val uri = lastOpenedUri ?: return
+        if (page < 0) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val existing = bookmarkDao.getByPage(uri, page)
+            if (existing != null) {
+                bookmarkDao.deleteById(existing.id)
+                _bookmarkEvents.tryEmit(BookmarkEvent.Removed(page))
+            } else {
+                val id = bookmarkDao.insert(
+                    BookmarkEntity(docUri = uri, pageNumber = page, createdAt = System.currentTimeMillis())
+                )
+                _bookmarkEvents.tryEmit(BookmarkEvent.Added(id, page))
+            }
+        }
+    }
+
+    fun setBookmarkNote(id: Long, note: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            bookmarkDao.updateNote(id, note.trim().ifBlank { null })
+        }
+    }
+
+    fun deleteBookmark(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) { bookmarkDao.deleteById(id) }
     }
 
     // ── Reading progress ──────────────────────────────────────────────────────

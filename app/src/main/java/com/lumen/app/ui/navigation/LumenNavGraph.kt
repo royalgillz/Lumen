@@ -177,8 +177,8 @@ fun LumenNavGraph(
             }
             composable(Screen.Library.route) {
                 LibraryScreen(
-                    onOpenDocument = { uri, filename ->
-                        navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename)) {
+                    onOpenDocument = { uri, filename, page ->
+                        navController.navigate(pdfViewerRoute(uri, page = page, filename = filename)) {
                             launchSingleTop = true
                         }
                     },
