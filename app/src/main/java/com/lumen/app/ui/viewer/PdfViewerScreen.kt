@@ -5,6 +5,9 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -30,7 +33,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -41,8 +45,10 @@ import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pin
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -77,6 +83,8 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,6 +95,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -95,8 +104,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
-import com.lumen.app.ui.theme.AmberAccent
+import com.lumen.app.ui.theme.Terracotta
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 @Composable
 fun PdfViewerScreen(
@@ -124,35 +137,83 @@ fun PdfViewerScreen(
     val pageHighlights by viewModel.pageHighlights.collectAsState()
 
     // ── Viewer-only Compose state ─────────────────────────────────────────────
-    val displayPage = remember { mutableIntStateOf(pageNumber) }
+    // After rotation the ViewModel remembers where the reader actually was; only a
+    // fresh open should start at the nav-arg page.
+    val initialPage = viewModel.lastViewedPage.takeIf { it >= 0 } ?: pageNumber
+    val displayPage = remember { mutableIntStateOf(initialPage) }
     val pageCount = remember { mutableIntStateOf(0) }
     var showPageJump by remember { mutableStateOf(false) }
     var pageJumpInput by remember { mutableStateOf("") }
     var showPasswordPrompt by remember { mutableStateOf(false) }
     var passwordInput by remember { mutableStateOf("") }
-    var activePdfPassword by remember { mutableStateOf<String?>(null) }
+    // Saveable: losing this on rotation reopened an unlocked encrypted PDF with a
+    // null password and re-prompted the reader.
+    var activePdfPassword by rememberSaveable { mutableStateOf<String?>(null) }
     // When opened from global search, pre-fill the in-document search bar with the
     // keyword so the reader can immediately step between occurrences.
-    var isViewerSearchActive by remember { mutableStateOf(keyword.isNotBlank()) }
-    var viewerSearchText by remember { mutableStateOf(keyword) }
+    var isViewerSearchActive by rememberSaveable { mutableStateOf(keyword.isNotBlank()) }
+    var viewerSearchText by rememberSaveable { mutableStateOf(keyword) }
+    // The query whose highlights stay on screen when the search bar is hidden.
+    // Cleared on explicit dismiss (X / toggle off) — falling back to the nav-arg
+    // keyword there resurrected the original search and teleported the view back
+    // to its first match.
+    var committedQuery by rememberSaveable { mutableStateOf(keyword) }
     // Pass the tapped occurrence to the first search only.
-    var initialSearchDone by remember { mutableStateOf(false) }
+    var initialSearchDone by rememberSaveable { mutableStateOf(false) }
+    var resumePromptShown by rememberSaveable { mutableStateOf(false) }
     var showBrightnessSlider by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
-    var brightness by remember { mutableFloatStateOf(0.5f) }
+    // Seed from the system brightness so opening the slider doesn't jump the
+    // screen to an arbitrary 50%; the override only applies once the user drags.
+    val systemBrightness = remember {
+        runCatching {
+            android.provider.Settings.System.getInt(
+                context.contentResolver,
+                android.provider.Settings.System.SCREEN_BRIGHTNESS,
+            ) / 255f
+        }.getOrDefault(0.5f).coerceIn(0f, 1f)
+    }
+    var brightness by remember { mutableFloatStateOf(systemBrightness) }
+    var brightnessTouched by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(true) }
     var controlsTouchTick by remember { mutableIntStateOf(0) }
+    var zoomPercent by remember { mutableIntStateOf(100) }
 
     val pdfDocView = remember { mutableStateOf<PdfDocumentView?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    // "Save a copy" — the reader picks a destination via the system file picker;
+    // the PDF bytes are streamed there directly, never through app storage.
+    val saveCopyLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf"),
+    ) { dest ->
+        if (dest != null) {
+            scope.launch {
+                val saved = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val src = Uri.parse(uri)
+                        context.contentResolver.openInputStream(src)!!.use { input ->
+                            context.contentResolver.openOutputStream(dest)!!.use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                    }.isSuccess
+                }
+                snackbarHostState.showSnackbar(if (saved) "Copy saved" else "Couldn't save copy")
+            }
+        }
+    }
 
     // The query whose occurrences drive the overlay: the in-document search text
-    // when the search bar is open, otherwise the keyword the viewer was opened with.
-    val effectiveQuery = (if (isViewerSearchActive) viewerSearchText else keyword).trim()
+    // while the bar is open, otherwise the last committed query.
+    val effectiveQuery = (if (isViewerSearchActive) viewerSearchText else committedQuery).trim()
     val viewerSearchQuery = viewerSearchText.trim()
     val isLoaded = documentState is PdfViewerViewModel.DocumentState.Loaded
     val viewerChromeColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.96f)
     val statusBarScrimColor = MaterialTheme.colorScheme.surfaceVariant
+    val canvasBackground = MaterialTheme.colorScheme.surfaceVariant.toArgb()
+    val canvasDivider = MaterialTheme.colorScheme.outlineVariant.toArgb()
     val statusBarColor = statusBarScrimColor.toArgb()
     var topBarHeightPx by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
@@ -165,6 +226,13 @@ fun PdfViewerScreen(
         label = "viewer_top_chrome_padding",
     )
 
+    // System Back closes the in-document search before leaving the screen.
+    BackHandler(enabled = isViewerSearchActive) {
+        isViewerSearchActive = false
+        viewerSearchText = ""
+        committedQuery = ""
+    }
+
     // ── Open the document on first composition / when password changes ───────
     LaunchedEffect(uri, activePdfPassword) {
         if (!parsedUriIsValid) return@LaunchedEffect
@@ -174,7 +242,7 @@ fun PdfViewerScreen(
     // ── React to VM state transitions ─────────────────────────────────────────
     LaunchedEffect(documentState) {
         when (documentState) {
-            PdfViewerViewModel.DocumentState.NeedsPassword -> {
+            is PdfViewerViewModel.DocumentState.NeedsPassword -> {
                 showPasswordPrompt = true
                 showControls = true
             }
@@ -216,9 +284,9 @@ fun PdfViewerScreen(
         }
     }
 
-    // Brightness override
-    LaunchedEffect(brightness, showBrightnessSlider) {
-        if (showBrightnessSlider) {
+    // Brightness override — only after the user has actually dragged the slider.
+    LaunchedEffect(brightness, brightnessTouched) {
+        if (brightnessTouched) {
             val window = activity?.window
             if (window != null) {
                 val lp = window.attributes
@@ -228,11 +296,13 @@ fun PdfViewerScreen(
         }
     }
 
-    // Resume-at-last-page snackbar
-    LaunchedEffect(uri, documentState is PdfViewerViewModel.DocumentState.Loaded) {
-        if (documentState !is PdfViewerViewModel.DocumentState.Loaded) return@LaunchedEffect
-        val lastPage = viewModel.getLastPage(uri)
-        if (lastPage != null && lastPage != pageNumber) {
+    // Resume-at-last-page snackbar. The saved page is captured by the ViewModel
+    // before this session writes any progress, so this cannot race the first save.
+    LaunchedEffect(uri, isLoaded) {
+        if (!isLoaded || resumePromptShown) return@LaunchedEffect
+        val lastPage = viewModel.resumePage?.takeIf { it >= 0 } ?: return@LaunchedEffect
+        if (lastPage != pageNumber) {
+            resumePromptShown = true
             val result = snackbarHostState.showSnackbar(
                 message = "Resume from p. ${lastPage + 1}",
                 actionLabel = "Go",
@@ -262,31 +332,37 @@ fun PdfViewerScreen(
         }
     }
 
-    // Bring the active match's page into view. Keyed on page only, so it doesn't
-    // re-snap while the user scrolls within the page.
-    LaunchedEffect(activePage) {
-        if (activePage >= 0) pdfDocView.value?.jumpToPage(activePage, animate = true)
+    // Bring a match's page into view on explicit search actions only. Event-based:
+    // keying on activePage state re-jumped the view on every recomposition-restart
+    // (e.g. rotation), losing the reader's position.
+    LaunchedEffect(Unit) {
+        viewModel.scrollToPage.collect { page ->
+            pdfDocView.value?.jumpToPage(page, animate = true)
+        }
     }
 
-    // Lazily compute highlight rects for whatever page is on screen (a no-op for
-    // non-match pages and already-computed pages). Covers both search jumps and
-    // manual scrolling onto a match page.
+    // Lazily compute highlight rects for the on-screen page and its neighbours (a
+    // no-op for non-match and already-computed pages). Covers search jumps and
+    // manual scrolling onto a match page; the background count pass fills the rest.
     LaunchedEffect(displayPage.intValue, matchPages) {
         viewModel.ensurePageHighlights(displayPage.intValue)
+        viewModel.ensurePageHighlights(displayPage.intValue - 1)
+        viewModel.ensurePageHighlights(displayPage.intValue + 1)
     }
 
-    // Draw the highlights for whichever page is currently shown, emphasising the
-    // active match only when its page is the one on screen. Because each
-    // PageHighlights carries its own page index, rects can never be drawn on the
-    // wrong page.
-    LaunchedEffect(displayPage.intValue, pageHighlights, activePage, activeRectIndexOnPage) {
+    // Push every computed page's highlights to the view — visible neighbours paint
+    // too, not just the centre page.
+    LaunchedEffect(pageHighlights, activePage, activeRectIndexOnPage) {
         val v = pdfDocView.value ?: return@LaunchedEffect
-        val ph = pageHighlights[displayPage.intValue]
-        if (ph != null && ph.rects.isNotEmpty() && ph.pageWidthPts > 0f) {
-            val activeIdx = if (displayPage.intValue == activePage) activeRectIndexOnPage else -1
-            v.setHighlight(ph.pageIndex, ph.rects, ph.pageWidthPts, ph.pageHeightPts, activeIdx)
-        } else {
+        val byPage = pageHighlights
+            .filterValues { it.rects.isNotEmpty() && it.pageWidthPts > 0f }
+            .mapValues { (_, ph) ->
+                PdfDocumentView.PageHighlightSet(ph.rects, ph.pageWidthPts, ph.pageHeightPts)
+            }
+        if (byPage.isEmpty()) {
             v.clearHighlight()
+        } else {
+            v.setHighlights(byPage, activePage, activeRectIndexOnPage)
         }
     }
 
@@ -300,7 +376,8 @@ fun PdfViewerScreen(
         val v = pdfDocView.value ?: return@LaunchedEffect
         when (val state = documentState) {
             is PdfViewerViewModel.DocumentState.Loaded -> {
-                v.setRenderer(state.renderer, pageNumber)
+                v.setRenderer(state.renderer, initialPage)
+                v.wordProvider = { page -> viewModel.wordsForPage(page) }
                 v.setScrollHorizontal(scrollHorizontal)
                 pageCount.intValue = state.renderer.pageCount
             }
@@ -310,6 +387,8 @@ fun PdfViewerScreen(
 
     // ── Dialogs ───────────────────────────────────────────────────────────────
     if (showPasswordPrompt) {
+        val wrongPassword =
+            (documentState as? PdfViewerViewModel.DocumentState.NeedsPassword)?.wrongPassword == true
         AlertDialog(
             onDismissRequest = {
                 showPasswordPrompt = false
@@ -317,12 +396,23 @@ fun PdfViewerScreen(
             },
             title = { Text("Encrypted PDF") },
             text = {
-                TextField(
-                    value = passwordInput,
-                    onValueChange = { passwordInput = it },
-                    label = { Text("Enter PDF password") },
-                    singleLine = true,
-                )
+                Column {
+                    TextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("Enter PDF password") },
+                        singleLine = true,
+                        isError = wrongPassword,
+                    )
+                    if (wrongPassword) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Incorrect password. Try again.",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -409,13 +499,18 @@ fun PdfViewerScreen(
                                     override fun onPageChanged(currentPage: Int, totalPages: Int) {
                                         displayPage.intValue = currentPage
                                         pageCount.intValue = totalPages
-                                        viewModel.saveLastPage(uri, currentPage)
+                                        viewModel.noteCurrentPage(uri, currentPage)
                                     }
                                     override fun onSingleTap() {
                                         showControls = !showControls
                                         if (!showControls) {
                                             showBrightnessSlider = false
-                                            isViewerSearchActive = false
+                                            // Hiding chrome keeps the current query's
+                                            // highlights alive — only X/toggle dismisses.
+                                            if (isViewerSearchActive) {
+                                                committedQuery = viewerSearchText
+                                                isViewerSearchActive = false
+                                            }
                                         }
                                         controlsTouchTick++
                                     }
@@ -428,37 +523,84 @@ fun PdfViewerScreen(
                                     override fun onInternalLinkTap(pageIndex: Int) {
                                         v.jumpToPage(pageIndex, animate = true)
                                     }
-                                    override fun onZoomChanged(zoom: Float) { /* no-op */ }
+                                    override fun onZoomChanged(zoom: Float) {
+                                        zoomPercent = (zoom * 100).roundToInt().coerceAtLeast(1)
+                                    }
                                 })
+                                v.setCanvasColors(canvasBackground, canvasDivider)
                                 if (state is PdfViewerViewModel.DocumentState.Loaded) {
-                                    v.setRenderer(state.renderer, pageNumber)
+                                    v.setRenderer(state.renderer, initialPage)
+                                    v.wordProvider = { page -> viewModel.wordsForPage(page) }
                                     v.setScrollHorizontal(scrollHorizontal)
                                     pageCount.intValue = state.renderer.pageCount
                                 }
                             }
                         },
+                        update = { v -> v.setCanvasColors(canvasBackground, canvasDivider) },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
 
             if (!isFailed && !isLocked && parsedUriIsValid) {
-                Column(
+                // Zoom pill: − · % · +. Tapping the percentage snaps back to 100%.
+                Surface(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                    shape = RoundedCornerShape(percent = 50),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    shadowElevation = 4.dp,
                 ) {
-                    ZoomButton(icon = { Icon(Icons.Default.Add, contentDescription = "Zoom in") }) {
-                        pdfDocView.value?.zoomBy(1.25f)
-                        showControls = true
-                        controlsTouchTick++
-                    }
-                    ZoomButton(icon = { Icon(Icons.Default.Remove, contentDescription = "Zoom out") }) {
-                        pdfDocView.value?.zoomBy(1f / 1.25f)
-                        showControls = true
-                        controlsTouchTick++
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    ) {
+                        IconButton(
+                            onClick = {
+                                pdfDocView.value?.zoomBy(1f / 1.25f)
+                                showControls = true
+                                controlsTouchTick++
+                            },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Remove,
+                                contentDescription = "Zoom out",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        Text(
+                            text = "$zoomPercent%",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .clickable {
+                                    pdfDocView.value?.resetZoom()
+                                    showControls = true
+                                    controlsTouchTick++
+                                }
+                                .width(48.dp)
+                                .padding(vertical = 10.dp),
+                        )
+                        IconButton(
+                            onClick = {
+                                pdfDocView.value?.zoomBy(1.25f)
+                                showControls = true
+                                controlsTouchTick++
+                            },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = "Zoom in",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                 }
             }
@@ -539,6 +681,7 @@ fun PdfViewerScreen(
                             isViewerSearchActive = !isViewerSearchActive
                             if (!isViewerSearchActive) {
                                 viewerSearchText = ""
+                                committedQuery = ""
                             }
                             showControls = true
                             controlsTouchTick++
@@ -546,7 +689,7 @@ fun PdfViewerScreen(
                             Icon(
                                 Icons.Default.Search,
                                 contentDescription = "Search in document",
-                                tint = if (isViewerSearchActive) AmberAccent else MaterialTheme.colorScheme.onSurface,
+                                tint = if (isViewerSearchActive) Terracotta else MaterialTheme.colorScheme.onSurface,
                             )
                         }
                         Box {
@@ -573,6 +716,29 @@ fun PdfViewerScreen(
                                     },
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("Print") },
+                                    leadingIcon = { Icon(Icons.Default.Print, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        controlsTouchTick++
+                                        printPdf(context, uri, filename) {
+                                            scope.launch { snackbarHostState.showSnackbar("Couldn't print this PDF") }
+                                        }
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Save a copy") },
+                                    leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        controlsTouchTick++
+                                        runCatching { saveCopyLauncher.launch(filename) }
+                                            .onFailure {
+                                                scope.launch { snackbarHostState.showSnackbar("Couldn't open the file picker") }
+                                            }
+                                    },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Go to page") },
                                     leadingIcon = { Icon(Icons.Default.Pin, contentDescription = null) },
                                     onClick = {
@@ -587,7 +753,7 @@ fun PdfViewerScreen(
                                         Icon(
                                             Icons.Default.BrightnessMedium,
                                             contentDescription = null,
-                                            tint = if (showBrightnessSlider) AmberAccent else MaterialTheme.colorScheme.onSurface,
+                                            tint = if (showBrightnessSlider) Terracotta else MaterialTheme.colorScheme.onSurface,
                                         )
                                     },
                                     onClick = {
@@ -692,6 +858,7 @@ fun PdfViewerScreen(
                                 onClick = {
                                     isViewerSearchActive = false
                                     viewerSearchText = ""
+                                    committedQuery = ""
                                     controlsTouchTick++
                                 },
                                 modifier = Modifier.size(36.dp),
@@ -722,10 +889,11 @@ fun PdfViewerScreen(
                                 value = brightness,
                                 onValueChange = {
                                     brightness = it
+                                    brightnessTouched = true
                                     controlsTouchTick++
                                 },
                                 modifier = Modifier.weight(1f),
-                                colors = SliderDefaults.colors(thumbColor = AmberAccent, activeTrackColor = AmberAccent),
+                                colors = SliderDefaults.colors(thumbColor = Terracotta, activeTrackColor = Terracotta),
                             )
                             Icon(
                                 Icons.Default.BrightnessHigh,
@@ -804,6 +972,75 @@ private fun sharePdf(
     }
 }
 
+/**
+ * Print via the system print framework. The PDF is already print-ready, so the
+ * adapter streams the original bytes straight to the print spooler — no
+ * re-rendering, and everything stays on-device.
+ */
+private fun printPdf(
+    context: android.content.Context,
+    rawUri: String,
+    filename: String,
+    onError: () -> Unit,
+) {
+    val uri = runCatching { Uri.parse(rawUri) }.getOrNull()
+    if (uri == null) {
+        onError()
+        return
+    }
+    val printManager = context.getSystemService(android.content.Context.PRINT_SERVICE)
+        as? android.print.PrintManager
+    if (printManager == null) {
+        onError()
+        return
+    }
+    val adapter = object : android.print.PrintDocumentAdapter() {
+        override fun onLayout(
+            oldAttributes: android.print.PrintAttributes?,
+            newAttributes: android.print.PrintAttributes?,
+            cancellationSignal: android.os.CancellationSignal?,
+            callback: LayoutResultCallback,
+            extras: android.os.Bundle?,
+        ) {
+            if (cancellationSignal?.isCanceled == true) {
+                callback.onLayoutCancelled()
+                return
+            }
+            val info = android.print.PrintDocumentInfo.Builder(filename)
+                .setContentType(android.print.PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                .build()
+            callback.onLayoutFinished(info, newAttributes != oldAttributes)
+        }
+
+        override fun onWrite(
+            pages: Array<out android.print.PageRange>?,
+            destination: android.os.ParcelFileDescriptor,
+            cancellationSignal: android.os.CancellationSignal?,
+            callback: WriteResultCallback,
+        ) {
+            try {
+                val copied = context.contentResolver.openInputStream(uri)?.use { input ->
+                    java.io.FileOutputStream(destination.fileDescriptor).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                if (copied == null) {
+                    callback.onWriteFailed("Cannot open PDF")
+                    return
+                }
+                callback.onWriteFinished(arrayOf(android.print.PageRange.ALL_PAGES))
+            } catch (e: Exception) {
+                callback.onWriteFailed(e.message)
+            }
+        }
+    }
+    try {
+        printManager.print(filename, adapter, android.print.PrintAttributes.Builder().build())
+    } catch (_: Exception) {
+        onError()
+    }
+}
+
 @Composable
 private fun PdfErrorScreen(
     message: String,
@@ -833,18 +1070,5 @@ private fun PdfErrorScreen(
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
             Text("Go back")
         }
-    }
-}
-
-@Composable
-private fun ZoomButton(icon: @Composable () -> Unit, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f),
-        shadowElevation = 4.dp,
-        modifier = Modifier.size(44.dp),
-    ) {
-        Box(contentAlignment = Alignment.Center) { icon() }
     }
 }

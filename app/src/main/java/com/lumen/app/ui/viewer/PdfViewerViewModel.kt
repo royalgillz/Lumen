@@ -11,14 +11,20 @@ import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.ocr.OcrWordBoxes
 import com.lumen.app.data.pdf.PdfHighlighter
 import com.lumen.app.data.repository.SearchRepository
+import com.lumen.app.di.ApplicationScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -31,6 +37,7 @@ class PdfViewerViewModel @Inject constructor(
     private val searchRepository: SearchRepository,
     private val safRepository: SafRepository,
     private val pageDao: PageDao,
+    @ApplicationScope private val appScope: CoroutineScope,
 ) : AndroidViewModel(application) {
 
     private companion object {
@@ -45,7 +52,9 @@ class PdfViewerViewModel @Inject constructor(
         object Idle : DocumentState()
         object Loading : DocumentState()
         data class Loaded(val renderer: MuPdfPageRenderer) : DocumentState()
-        object NeedsPassword : DocumentState()
+        /** [wrongPassword] is true when a password was supplied and rejected, so
+         *  the prompt can say "incorrect" rather than silently reopening. */
+        data class NeedsPassword(val wrongPassword: Boolean = false) : DocumentState()
         data class Failed(val message: String) : DocumentState()
     }
 
@@ -56,6 +65,20 @@ class PdfViewerViewModel @Inject constructor(
     private var currentRenderer: MuPdfPageRenderer? = null
     private var lastOpenedUri: String? = null
     private var lastOpenedPassword: String? = null
+
+    /**
+     * The page saved from a previous session, captured once per document open
+     * BEFORE any save from this session can overwrite it — reading it lazily from
+     * the screen raced the first onPageChanged save, which on small documents won
+     * and silently suppressed the resume snackbar.
+     */
+    var resumePage: Int? = null
+        private set
+
+    /** Page currently on screen; survives rotation so the recreated view can
+     *  reopen where the user actually was, not at the nav-arg page. */
+    var lastViewedPage: Int = -1
+        private set
 
     fun openDocument(uriString: String, password: String? = null) {
         openJob?.cancel()
@@ -70,10 +93,21 @@ class PdfViewerViewModel @Inject constructor(
             _documentState.value is DocumentState.Loaded) {
             return
         }
+        // Different document reusing this ViewModel (launchSingleTop replaces the
+        // nav entry's arguments in place, e.g. an external VIEW intent while the
+        // viewer is open): drop every per-document remnant, or the new PDF opens
+        // at the old one's page with the old one's search state.
+        if (lastOpenedUri != null && uriString != lastOpenedUri) {
+            resumePage = null
+            lastViewedPage = -1
+            savePageJob?.cancel()
+            resetSearch()
+        }
         lastOpenedUri = uriString
         lastOpenedPassword = password
         _documentState.value = DocumentState.Loading
         openJob = viewModelScope.launch(Dispatchers.IO) {
+            if (resumePage == null) resumePage = safRepository.getLastPage(uriString) ?: -1
             // Drop any prior session.
             val prior = currentRenderer
             currentRenderer = null
@@ -84,7 +118,8 @@ class PdfViewerViewModel @Inject constructor(
                     _documentState.value = DocumentState.Loaded(res.renderer)
                 }
                 MuPdfPageRenderer.OpenResult.NeedsPassword -> {
-                    _documentState.value = DocumentState.NeedsPassword
+                    _documentState.value =
+                        DocumentState.NeedsPassword(wrongPassword = !password.isNullOrEmpty())
                 }
                 is MuPdfPageRenderer.OpenResult.Error -> {
                     _documentState.value = DocumentState.Failed(
@@ -155,6 +190,15 @@ class PdfViewerViewModel @Inject constructor(
     private val _activeRectIndexOnPage = MutableStateFlow(-1)
     val activeRectIndexOnPage: StateFlow<Int> = _activeRectIndexOnPage.asStateFlow()
 
+    /**
+     * One-shot "scroll the view to this page" requests, emitted only by explicit
+     * search actions (a new search landing, next/prev navigation). Events rather
+     * than state: re-collecting state after rotation would re-jump the view to the
+     * match page and lose the reader's restored position.
+     */
+    private val _scrollToPage = MutableSharedFlow<Int>(extraBufferCapacity = 4)
+    val scrollToPage: SharedFlow<Int> = _scrollToPage.asSharedFlow()
+
     /** Lazily-populated per-page highlight rects, keyed by page index. An entry with
      *  empty rects means "computed, nothing to draw" and is not recomputed. */
     private val _pageHighlights = MutableStateFlow<Map<Int, PdfHighlighter.PageHighlights>>(emptyMap())
@@ -187,10 +231,15 @@ class PdfViewerViewModel @Inject constructor(
         preferredPage: Int? = null,
         preferredOccurrence: Int = 0,
     ) {
+        val trimmed = keyword.trim()
+        // Same live search (e.g. the screen recomposing after rotation): keep the
+        // existing match state instead of resetting and re-jumping to a match page.
+        if (docUri == searchDocUri && trimmed == searchKeyword && _matchPages.value.isNotEmpty()) {
+            return
+        }
         searchJob?.cancel()
         countJob?.cancel()
         navJob?.cancel()
-        val trimmed = keyword.trim()
         if (trimmed.length < 2) {
             resetSearch()
             return
@@ -224,6 +273,7 @@ class PdfViewerViewModel @Inject constructor(
                     _activePage.value = p
                     _activeRectIndexOnPage.value =
                         if (p == startPage) preferredOccurrence.coerceIn(0, n - 1) else 0
+                    _scrollToPage.tryEmit(p)
                     landed = true
                     break
                 }
@@ -233,6 +283,7 @@ class PdfViewerViewModel @Inject constructor(
                 // OOM-skipped). Still position on the start page so search "works".
                 _activePage.value = startPage
                 _activeRectIndexOnPage.value = -1
+                _scrollToPage.tryEmit(startPage)
             }
             recompute()
             startCountPass()
@@ -286,7 +337,8 @@ class PdfViewerViewModel @Inject constructor(
         }
     }
 
-    /** OCR page → DB boxes (free); else text-layer page → lazy MuPDF rects. */
+    /** OCR page → DB boxes (free); else text-layer page → lazy MuPDF rects,
+     *  preferring the viewer's already-open document over a per-page reopen. */
     private suspend fun computePageHighlights(
         uri: Uri,
         page: Int,
@@ -294,6 +346,14 @@ class PdfViewerViewModel @Inject constructor(
         password: String?,
     ): PdfHighlighter.PageHighlights {
         ocrHighlightsForPage(page, keyword)?.let { return it }
+        currentRenderer?.let { renderer ->
+            runCatching {
+                renderer.withDocumentGated { doc ->
+                    pdfHighlighter.findOnPageInDocument(doc, page, keyword)
+                }
+            }.getOrNull()?.let { return it }
+        }
+        // Renderer closed / not ready — fall back to a one-shot open.
         return runCatching { pdfHighlighter.findOnPage(uri, page, keyword, password) }
             .getOrElse { PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f) }
     }
@@ -305,8 +365,10 @@ class PdfViewerViewModel @Inject constructor(
      */
     private suspend fun ocrHighlightsForPage(page: Int, keyword: String): PdfHighlighter.PageHighlights? {
         val renderer = currentRenderer ?: return null
-        val needle = keyword.lowercase()
-        if (needle.isEmpty()) return null
+        // Token-based like the text-layer path: OCR boxes are per word, so a
+        // multi-word query can never match a single box — match each token instead.
+        val needles = keyword.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (needles.isEmpty()) return null
         val rows = runCatching { pageDao.ocrWordBoxes(searchDocUri, listOf(page)) }.getOrNull()
         val row = rows?.firstOrNull() ?: return null
         val size = renderer.pageSize(page) ?: return PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f)
@@ -314,9 +376,34 @@ class PdfViewerViewModel @Inject constructor(
         val h = size.height
         if (w <= 0f || h <= 0f) return PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f)
         val rects = OcrWordBoxes.decode(row.wordBoxesJson)
-            .filter { it.text.lowercase().contains(needle) }
+            .filter { box -> needles.any { box.text.lowercase().contains(it) } }
             .map { RectF(it.left * w, it.top * h, it.right * w, it.bottom * h) }
         return PdfHighlighter.PageHighlights(page, rects, w, h)
+    }
+
+    /**
+     * Words for long-press selection on [page]: structured text when the page has
+     * a text layer, else the OCR word boxes stored at index time — so selection
+     * also works on scanned pages. Keyed by the open document's own URI (not the
+     * search context, which only exists during an in-document search).
+     */
+    suspend fun wordsForPage(page: Int): List<MuPdfPageRenderer.WordBox> {
+        val renderer = currentRenderer
+        val textWords = renderer?.let { runCatching { it.wordsForPage(page) }.getOrNull() }.orEmpty()
+        if (textWords.isNotEmpty()) return textWords
+        val docUri = lastOpenedUri ?: return emptyList()
+        val rows = runCatching { pageDao.ocrWordBoxes(docUri, listOf(page)) }.getOrNull()
+        val row = rows?.firstOrNull() ?: return emptyList()
+        val size = renderer?.pageSize(page) ?: return emptyList()
+        val w = size.width
+        val h = size.height
+        if (w <= 0f || h <= 0f) return emptyList()
+        return OcrWordBoxes.decode(row.wordBoxesJson).map { box ->
+            MuPdfPageRenderer.WordBox(
+                box.text,
+                RectF(box.left * w, box.top * h, box.right * w, box.bottom * h),
+            )
+        }
     }
 
     fun nextOccurrence() = step(+1)
@@ -332,7 +419,8 @@ class PdfViewerViewModel @Inject constructor(
         val pages = _matchPages.value
         if (pages.isEmpty()) return
         navJob?.cancel()
-        navJob = viewModelScope.launch(Dispatchers.Main.immediate) {
+        // IO, not Main: an uncached page runs native structured-text extraction here.
+        navJob = viewModelScope.launch(Dispatchers.IO) {
             val page = _activePage.value
             val curRects = if (page >= 0) rectsFor(page).rects.size else 0
             val target = _activeRectIndexOnPage.value + dir
@@ -348,6 +436,7 @@ class PdfViewerViewModel @Inject constructor(
                 if (n > 0) {
                     _activePage.value = p
                     _activeRectIndexOnPage.value = if (dir > 0) 0 else n - 1
+                    _scrollToPage.tryEmit(p)
                     recompute()
                     return@launch
                 }
@@ -411,11 +500,21 @@ class PdfViewerViewModel @Inject constructor(
 
     // ── Reading progress ──────────────────────────────────────────────────────
 
-    fun saveLastPage(uri: String, page: Int) {
-        viewModelScope.launch { safRepository.saveLastPage(uri, page) }
-    }
+    private var savePageJob: Job? = null
 
-    suspend fun getLastPage(uri: String): Int? = safRepository.getLastPage(uri)
+    /**
+     * Record the page currently on screen. The DataStore write is debounced (a
+     * fling emits every page it crosses) and runs on the application scope so the
+     * final position lands even if the user exits the viewer inside the window.
+     */
+    fun noteCurrentPage(uri: String, page: Int) {
+        lastViewedPage = page
+        savePageJob?.cancel()
+        savePageJob = appScope.launch {
+            delay(400)
+            safRepository.saveLastPage(uri, page)
+        }
+    }
 }
 
 private const val OOM_MESSAGE =

@@ -5,15 +5,14 @@ import android.graphics.Bitmap
 import android.graphics.RectF
 import android.net.Uri
 import android.util.SizeF
-import com.artifex.mupdf.fitz.ColorSpace
 import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Link
 import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.Page
 import com.artifex.mupdf.fitz.Rect
+import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import com.lumen.app.data.pdf.MuPdfGate
 import com.lumen.app.data.pdf.PfdSeekableStream
-import com.lumen.app.data.pdf.pixmapToBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -48,6 +47,10 @@ class MuPdfPageRenderer private constructor(
         val destPage: Int?,
     )
 
+    /** One word of page text with its bounding box in page-pt coordinates
+     *  (origin at the page's top-left, same space as [pageSize]). */
+    data class WordBox(val text: String, val rect: RectF)
+
     suspend fun pageSize(index: Int): SizeF? {
         if (index !in 0 until pageCount) return null
         pageBoundsCache[index]?.let { return it }
@@ -77,18 +80,11 @@ class MuPdfPageRenderer private constructor(
             val page = runCatching { doc.loadPage(index) }.getOrNull() ?: return@withDocLock null
             try {
                 val matrix = Matrix(scale, scale)
-                // Render WITH alpha so MuPDF preserves soft-mask transparency on
-                // images; pixmapToBitmap then composites over white. Rendering
-                // without alpha makes MuPDF flatten soft-masked icons onto their own
-                // backdrop colour, which is the "solid teal block" symptom.
-                val pixmap = runCatching {
-                    page.toPixmap(matrix, ColorSpace.DeviceRGB, /* alpha = */ true)
-                }.getOrNull() ?: return@withDocLock null
-                try {
-                    pixmapToBitmap(pixmap)
-                } finally {
-                    pixmap.destroy()
-                }
+                // AndroidDrawDevice rasterises natively into a white-cleared opaque
+                // ARGB_8888 bitmap — stride, premultiplied alpha, and colorspace
+                // conversion all happen inside fitz, so soft-masked content can
+                // never bleed the canvas colour through.
+                runCatching { AndroidDrawDevice.drawPage(page, matrix) }.getOrNull()
             } catch (_: Throwable) {
                 null
             } finally {
@@ -96,6 +92,101 @@ class MuPdfPageRenderer private constructor(
             }
           }
         }
+    }
+
+    /**
+     * Run [block] against the open document, holding the global render permit and
+     * the document lock (in that order — the same order [renderPage] uses, so the
+     * two paths can never deadlock). Lets callers reuse this session instead of
+     * reopening the file per operation (highlight extraction previously reopened
+     * and reparsed the whole PDF for every page it computed rects for).
+     */
+    suspend fun <R> withDocumentGated(block: (Document) -> R): R? =
+        MuPdfGate.withRenderPermit { withDocLock { block(doc) } }
+
+    /**
+     * Words with boxes for [index], from MuPDF structured text. Used for
+     * long-press word selection; scanned pages without a text layer return empty.
+     * Gated like rendering — structured text allocates native memory.
+     */
+    suspend fun wordsForPage(index: Int): List<WordBox> {
+        if (index !in 0 until pageCount) return emptyList()
+        return MuPdfGate.withRenderPermit {
+            withDocLock {
+                val page = runCatching { doc.loadPage(index) }.getOrNull()
+                    ?: return@withDocLock emptyList()
+                try {
+                    val bounds = page.bounds
+                    val stext = runCatching { page.toStructuredText("preserve-whitespace") }
+                        .getOrNull() ?: return@withDocLock emptyList<WordBox>()
+                    try {
+                        extractWords(stext, bounds.x0, bounds.y0)
+                    } finally {
+                        runCatching { stext.destroy() }
+                    }
+                } catch (_: Throwable) {
+                    emptyList()
+                } finally {
+                    runCatching { page.destroy() }
+                }
+            }
+        } ?: emptyList()
+    }
+
+    private fun extractWords(
+        stext: com.artifex.mupdf.fitz.StructuredText,
+        offsetX: Float,
+        offsetY: Float,
+    ): List<WordBox> {
+        val words = ArrayList<WordBox>(256)
+        val sb = StringBuilder()
+        var minX = 0f; var minY = 0f; var maxX = 0f; var maxY = 0f
+        var open = false
+
+        fun flush() {
+            if (open && sb.isNotEmpty()) {
+                words.add(
+                    WordBox(
+                        text = sb.toString(),
+                        rect = RectF(minX - offsetX, minY - offsetY, maxX - offsetX, maxY - offsetY),
+                    )
+                )
+            }
+            sb.setLength(0)
+            open = false
+        }
+
+        val blocks = runCatching { stext.blocks }.getOrNull() ?: return emptyList()
+        for (block in blocks) {
+            val lines = runCatching { block?.lines }.getOrNull() ?: continue
+            for (line in lines) {
+                val chars = runCatching { line?.chars }.getOrNull() ?: continue
+                for (ch in chars) {
+                    val cp = ch?.c ?: continue
+                    val quad = ch.quad ?: continue
+                    if (Character.isWhitespace(cp)) {
+                        flush()
+                        continue
+                    }
+                    val qMinX = minOf(quad.ul_x, quad.ur_x, quad.ll_x, quad.lr_x)
+                    val qMaxX = maxOf(quad.ul_x, quad.ur_x, quad.ll_x, quad.lr_x)
+                    val qMinY = minOf(quad.ul_y, quad.ur_y, quad.ll_y, quad.lr_y)
+                    val qMaxY = maxOf(quad.ul_y, quad.ur_y, quad.ll_y, quad.lr_y)
+                    if (!open) {
+                        minX = qMinX; minY = qMinY; maxX = qMaxX; maxY = qMaxY
+                        open = true
+                    } else {
+                        if (qMinX < minX) minX = qMinX
+                        if (qMinY < minY) minY = qMinY
+                        if (qMaxX > maxX) maxX = qMaxX
+                        if (qMaxY > maxY) maxY = qMaxY
+                    }
+                    sb.appendCodePoint(cp)
+                }
+                flush()
+            }
+        }
+        return words
     }
 
     suspend fun linksForPage(index: Int): List<LinkInfo> {

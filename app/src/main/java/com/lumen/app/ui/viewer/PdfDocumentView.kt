@@ -1,6 +1,8 @@
 package com.lumen.app.ui.viewer
 
 import android.animation.ValueAnimator
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Bitmap
@@ -8,13 +10,18 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.util.SizeF
+import android.view.ActionMode
 import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
+import android.view.Menu
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.accessibility.AccessibilityManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.OverScroller
 import androidx.collection.LruCache
@@ -116,13 +123,50 @@ class PdfDocumentView @JvmOverloads constructor(
         }
     private val inFlightRenders = HashMap<CacheKey, Job>()
 
-    /** Highlights for one specific page, in page-pt coordinates. */
-    private var highlightPageIndex: Int = -1
-    private var highlightRects: List<RectF> = emptyList()
-    private var highlightPageWidthPts: Float = 0f
-    private var highlightPageHeightPts: Float = 0f
-    /** Index into [highlightRects] of the actively-focused occurrence, or -1. */
+    /** Per-page link lists, prefetched for visible pages so tap hit-testing is
+     *  synchronous. Probing on tap had to wait on the document mutex behind any
+     *  in-flight render, which made the controls toggle feel dead during heavy
+     *  rendering. Small lists; cleared per document. */
+    private val linkCache = HashMap<Int, List<MuPdfPageRenderer.LinkInfo>>()
+    private val linkFetchesInFlight = HashSet<Int>()
+
+    // ── Word selection (long-press → word → floating copy menu, per Q4) ──────
+    /** Optional word source that can serve scanned/OCR pages (no text layer);
+     *  when unset, selection falls back to the renderer's structured text. */
+    var wordProvider: (suspend (Int) -> List<MuPdfPageRenderer.WordBox>)? = null
+    private val wordCache = HashMap<Int, List<MuPdfPageRenderer.WordBox>>()
+    private var selectionPage = -1
+    private var selectionRect: RectF? = null
+    private var selectionText: String? = null
+    private var actionMode: ActionMode? = null
+    private val selectionPaint = Paint().apply {
+        color = Color.argb(80, 0x2A, 0x4D, 0x3A) // translucent ForestGreen
+        style = Paint.Style.FILL
+    }
+    private val selectionStroke = Paint().apply {
+        color = Color.argb(220, 0x2A, 0x4D, 0x3A)
+        style = Paint.Style.STROKE
+        strokeWidth = context.resources.displayMetrics.density * 1.5f
+        isAntiAlias = true
+    }
+
+    /** One page's highlight rects, in page-pt coordinates. */
+    data class PageHighlightSet(
+        val rects: List<RectF>,
+        val pageWidthPts: Float,
+        val pageHeightPts: Float,
+    )
+
+    /** Highlights for every computed match page — visible neighbours paint too,
+     *  not just the centre page. */
+    private var highlightsByPage: Map<Int, PageHighlightSet> = emptyMap()
+    /** Page holding the actively-focused occurrence, or -1. */
+    private var highlightActivePage: Int = -1
+    /** Index into the active page's rects of the focused occurrence, or -1. */
     private var highlightActiveIndex: Int = -1
+    /** Last (page, index) auto-panned to, so map growth doesn't re-pan. */
+    private var lastEnsuredActivePage: Int = -1
+    private var lastEnsuredActiveIndex: Int = -1
 
     private val bgPaint = Paint().apply { color = 0xFF_141414.toInt() }
     private val pagePaint = Paint().apply { color = Color.WHITE; isAntiAlias = false }
@@ -181,6 +225,9 @@ class PdfDocumentView @JvmOverloads constructor(
 
     private var lastEmittedPage = -1
     private var lastEmittedZoom = -1f
+    /** Debounced page announcement for screen readers — a fling crosses many
+     *  pages; only the one it settles on should be spoken. */
+    private var announcePageRunnable: Runnable? = null
 
     private val tmpRect = RectF()
     private val tmpPagePt = FloatArray(2)
@@ -197,6 +244,19 @@ class PdfDocumentView @JvmOverloads constructor(
         listener = l
     }
 
+    /**
+     * Theme the canvas surround. The background was hardcoded dark, which clashed
+     * with the light theme (and contradicted the Drive-style neutral-surround
+     * decision). The host passes Material colours on composition.
+     */
+    fun setCanvasColors(background: Int, divider: Int) {
+        if (bgPaint.color == background && dividerPaint.color == divider) return
+        bgPaint.color = background
+        dividerPaint.color = divider
+        setBackgroundColor(background)
+        invalidate()
+    }
+
     fun setRenderer(renderer: MuPdfPageRenderer?, initialPage: Int) {
         // Drop everything tied to the previous document.
         cancelAllRenders()
@@ -210,6 +270,8 @@ class PdfDocumentView @JvmOverloads constructor(
         hasPositioned = false
 
         this.renderer = renderer
+        linkCache.clear()
+        linkFetchesInFlight.clear()
         pendingInitialPage = initialPage
         pageSizes = emptyList()
         pageOffsets = FloatArray(0)
@@ -218,8 +280,13 @@ class PdfDocumentView @JvmOverloads constructor(
         pageCount = renderer?.pageCount ?: 0
         lastEmittedPage = -1
         lastEmittedZoom = -1f
-        highlightPageIndex = -1
-        highlightRects = emptyList()
+        highlightsByPage = emptyMap()
+        highlightActivePage = -1
+        highlightActiveIndex = -1
+        lastEnsuredActivePage = -1
+        lastEnsuredActiveIndex = -1
+        wordCache.clear()
+        dismissSelection()
 
         if (renderer != null) {
             scope.launch { loadPageSizes(renderer) }
@@ -240,27 +307,36 @@ class PdfDocumentView @JvmOverloads constructor(
         invalidate()
     }
 
-    fun setHighlight(
-        pageIndex: Int,
-        rects: List<RectF>,
-        pageWidthPts: Float,
-        pageHeightPts: Float,
+    fun setHighlights(
+        byPage: Map<Int, PageHighlightSet>,
+        activePage: Int,
         activeIndex: Int = -1,
     ) {
-        highlightPageIndex = pageIndex
-        highlightRects = rects
-        highlightPageWidthPts = pageWidthPts
-        highlightPageHeightPts = pageHeightPts
-        highlightActiveIndex = if (rects.isEmpty()) -1 else activeIndex.coerceIn(-1, rects.size - 1)
-        ensureActiveHighlightVisible()
+        highlightsByPage = byPage
+        highlightActivePage = activePage
+        val activeRects = byPage[activePage]?.rects.orEmpty()
+        highlightActiveIndex =
+            if (activeRects.isEmpty()) -1 else activeIndex.coerceIn(-1, activeRects.size - 1)
+        // Auto-pan only when the ACTIVE occurrence changes. The background count
+        // pass updates the map page by page; panning on every update would yank
+        // the viewport back to the match while the user scrolls elsewhere.
+        if (highlightActivePage != lastEnsuredActivePage ||
+            highlightActiveIndex != lastEnsuredActiveIndex
+        ) {
+            lastEnsuredActivePage = highlightActivePage
+            lastEnsuredActiveIndex = highlightActiveIndex
+            ensureActiveHighlightVisible()
+        }
         invalidate()
     }
 
     fun clearHighlight() {
-        if (highlightPageIndex < 0 && highlightRects.isEmpty()) return
-        highlightPageIndex = -1
-        highlightRects = emptyList()
+        if (highlightsByPage.isEmpty() && highlightActivePage < 0) return
+        highlightsByPage = emptyMap()
+        highlightActivePage = -1
         highlightActiveIndex = -1
+        lastEnsuredActivePage = -1
+        lastEnsuredActiveIndex = -1
         invalidate()
     }
 
@@ -272,14 +348,15 @@ class PdfDocumentView @JvmOverloads constructor(
      */
     private fun ensureActiveHighlightVisible() {
         val idx = highlightActiveIndex
-        if (idx < 0 || idx >= highlightRects.size) return
-        if (highlightPageIndex !in 0 until pageCount) return
+        val activeSet = highlightsByPage[highlightActivePage] ?: return
+        if (idx < 0 || idx >= activeSet.rects.size) return
+        if (highlightActivePage !in 0 until pageCount) return
         if (pageSizes.isEmpty() || width == 0 || height == 0) return
-        val pageSize = pageSizes.getOrNull(highlightPageIndex) ?: return
-        val docRect = docRectForPage(highlightPageIndex, pageSize)
-        val sx = if (highlightPageWidthPts > 0f) pageSize.width / highlightPageWidthPts else 1f
-        val sy = if (highlightPageHeightPts > 0f) pageSize.height / highlightPageHeightPts else 1f
-        val r = highlightRects[idx]
+        val pageSize = pageSizes.getOrNull(highlightActivePage) ?: return
+        val docRect = docRectForPage(highlightActivePage, pageSize)
+        val sx = if (activeSet.pageWidthPts > 0f) pageSize.width / activeSet.pageWidthPts else 1f
+        val sy = if (activeSet.pageHeightPts > 0f) pageSize.height / activeSet.pageHeightPts else 1f
+        val r = activeSet.rects[idx]
         tmpRect.set(
             docRect.left + r.left * sx,
             docRect.top + r.top * sy,
@@ -396,9 +473,12 @@ class PdfDocumentView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        actionMode?.finish()
         runCatching { context.unregisterComponentCallbacks(memoryCallbacks) }
         flingJob?.let { removeCallbacks(it) }
         flingJob = null
+        announcePageRunnable?.let { removeCallbacks(it) }
+        announcePageRunnable = null
         removeCallbacks(hideScrollbarRunnable)
         scrollbarAnimator?.cancel()
         animator?.cancel()
@@ -442,7 +522,25 @@ class PdfDocumentView @JvmOverloads constructor(
             scroller.forceFinished(true)
             animator?.cancel()
         }
+        if (event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            // Drag released without a fling (onFling already ran if there was one,
+            // setting flingJob or the pager animator) — settle on the nearest page.
+            if (!scaleDetector.isInProgress && flingJob == null &&
+                animator?.isRunning != true && !isDraggingThumb
+            ) {
+                maybeSnapHorizontal()
+            }
+        }
         return handled || super.onTouchEvent(event)
+    }
+
+    private fun maybeSnapHorizontal() {
+        if (!scrollHorizontal) return
+        if (pageCount == 0 || pageOffsets.isEmpty()) return
+        if (currentZoom() > SNAP_ZOOM_MAX) return
+        jumpToPage(currentPageIndex(), animate = true)
     }
 
     private fun handleThumbTouch(event: MotionEvent): Boolean {
@@ -520,6 +618,8 @@ class PdfDocumentView @JvmOverloads constructor(
                     schedulePageRender(i, scaleBucket, zoom)
                 }
                 drawHighlightsForPage(canvas, i, docRect)
+                if (i == selectionPage) drawSelection(canvas, docRect)
+                prefetchLinks(i)
             } else {
                 // Prefetch only a cheap base (bucket 0) bitmap for off-screen
                 // neighbours. Prefetching at the current high zoom bucket would push
@@ -545,17 +645,18 @@ class PdfDocumentView @JvmOverloads constructor(
     }
 
     private fun drawHighlightsForPage(canvas: Canvas, pageIndex: Int, docPageRect: RectF) {
-        if (pageIndex != highlightPageIndex) return
-        if (highlightRects.isEmpty()) return
+        val set = highlightsByPage[pageIndex] ?: return
+        if (set.rects.isEmpty()) return
         val pageW = pageSizes.getOrNull(pageIndex)?.width ?: return
         val pageH = pageSizes.getOrNull(pageIndex)?.height ?: return
         // Map page-pt rects → doc-space (translate by page origin) → screen via matrix.
         // Highlights are reported in the same point space MuPDF used for rendering;
         // they may have been computed against a slightly different page size if the
         // PDF reports cropbox != mediabox. Scale to the renderer's bounds.
-        val sx = if (highlightPageWidthPts > 0f) pageW / highlightPageWidthPts else 1f
-        val sy = if (highlightPageHeightPts > 0f) pageH / highlightPageHeightPts else 1f
-        for ((i, rect) in highlightRects.withIndex()) {
+        val sx = if (set.pageWidthPts > 0f) pageW / set.pageWidthPts else 1f
+        val sy = if (set.pageHeightPts > 0f) pageH / set.pageHeightPts else 1f
+        val isActivePage = pageIndex == highlightActivePage
+        for ((i, rect) in set.rects.withIndex()) {
             tmpRect.set(
                 docPageRect.left + rect.left * sx,
                 docPageRect.top + rect.top * sy,
@@ -563,7 +664,7 @@ class PdfDocumentView @JvmOverloads constructor(
                 docPageRect.top + rect.bottom * sy,
             )
             matrix.mapRect(tmpRect)
-            if (i == highlightActiveIndex) {
+            if (isActivePage && i == highlightActiveIndex) {
                 canvas.drawRect(tmpRect, highlightActivePaint)
                 canvas.drawRect(tmpRect, highlightActiveStroke)
             } else {
@@ -862,6 +963,7 @@ class PdfDocumentView @JvmOverloads constructor(
 
     private inner class ScaleListener : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
+            if (selectionText != null) dismissSelection()
             val factor = detector.scaleFactor
             val current = currentZoom()
             val target = (current * factor).coerceIn(ZOOM_MIN, ZOOM_MAX)
@@ -885,12 +987,17 @@ class PdfDocumentView @JvmOverloads constructor(
             return true
         }
 
+        override fun onLongPress(e: MotionEvent) {
+            handleLongPressSelection(e.x, e.y)
+        }
+
         override fun onScroll(
             e1: MotionEvent?,
             e2: MotionEvent,
             distanceX: Float,
             distanceY: Float,
         ): Boolean {
+            if (selectionText != null) dismissSelection()
             matrix.postTranslate(-distanceX, -distanceY)
             clampMatrix()
             invalidate()
@@ -921,6 +1028,11 @@ class PdfDocumentView @JvmOverloads constructor(
         }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+            // An active selection is dismissed by the first tap, nothing else.
+            if (selectionText != null) {
+                dismissSelection()
+                return true
+            }
             // Inverse-map the tap point into doc-space, find which page (if any) it's on,
             // and check for link hits at that page-point.
             if (!matrix.invert(inverseMatrix)) {
@@ -940,10 +1052,154 @@ class PdfDocumentView @JvmOverloads constructor(
             val pageRect = docRectForPage(hitPage, pageSize)
             val pageX = docX - pageRect.left
             val pageY = docY - pageRect.top
-            // Link probe runs off-thread; deliver tap immediately so controls feel snappy
-            // and dispatch the link result asynchronously.
-            tryHandleLinkTap(hitPage, pageX, pageY)
+            val cached = linkCache[hitPage]
+            if (cached != null) {
+                // Prefetched — decide synchronously so the tap response is instant.
+                dispatchLinkHit(cached.firstOrNull { link ->
+                    val b = link.bounds
+                    pageX >= b.left && pageX <= b.right && pageY >= b.top && pageY <= b.bottom
+                })
+            } else {
+                tryHandleLinkTap(hitPage, pageX, pageY)
+            }
             return true
+        }
+    }
+
+    // ── Word selection ────────────────────────────────────────────────────────
+
+    private fun handleLongPressSelection(screenX: Float, screenY: Float) {
+        val r = renderer ?: return
+        if (!matrix.invert(inverseMatrix)) return
+        tmpPagePt[0] = screenX; tmpPagePt[1] = screenY
+        inverseMatrix.mapPoints(tmpPagePt)
+        val hitPage = pageAtDocPoint(tmpPagePt[0], tmpPagePt[1])
+        if (hitPage < 0) return
+        val pageRect = docRectForPage(hitPage, pageSizes[hitPage])
+        val px = tmpPagePt[0] - pageRect.left
+        val py = tmpPagePt[1] - pageRect.top
+        scope.launch {
+            val words = wordCache[hitPage]
+                ?: (wordProvider?.invoke(hitPage) ?: r.wordsForPage(hitPage)).also {
+                    if (this@PdfDocumentView.renderer === r) wordCache[hitPage] = it
+                }
+            val slop = 2f
+            val hit = words.firstOrNull { w ->
+                px >= w.rect.left - slop && px <= w.rect.right + slop &&
+                    py >= w.rect.top - slop && py <= w.rect.bottom + slop
+            } ?: return@launch
+            selectionPage = hitPage
+            selectionRect = RectF(hit.rect)
+            selectionText = hit.text
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            invalidate()
+            startSelectionActionMode()
+        }
+    }
+
+    private fun startSelectionActionMode() {
+        actionMode?.finish()
+        actionMode = startActionMode(object : ActionMode.Callback2() {
+            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                menu.add(Menu.NONE, MENU_COPY, 0, android.R.string.copy)
+                return true
+            }
+
+            override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
+
+            override fun onActionItemClicked(mode: ActionMode, item: android.view.MenuItem): Boolean {
+                return if (item.itemId == MENU_COPY) {
+                    copySelection()
+                    mode.finish()
+                    true
+                } else {
+                    false
+                }
+            }
+
+            override fun onDestroyActionMode(mode: ActionMode) {
+                actionMode = null
+                clearSelection()
+            }
+
+            override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
+                val r = selectionScreenRect()
+                if (r != null) {
+                    outRect.set(r.left.toInt(), r.top.toInt(), r.right.toInt(), r.bottom.toInt())
+                } else {
+                    outRect.set(0, 0, width, height)
+                }
+            }
+        }, ActionMode.TYPE_FLOATING)
+    }
+
+    private fun selectionScreenRect(): RectF? {
+        val rect = selectionRect ?: return null
+        val pageSize = pageSizes.getOrNull(selectionPage) ?: return null
+        val docRect = docRectForPage(selectionPage, pageSize)
+        val out = RectF(
+            docRect.left + rect.left,
+            docRect.top + rect.top,
+            docRect.left + rect.right,
+            docRect.top + rect.bottom,
+        )
+        matrix.mapRect(out)
+        return out
+    }
+
+    private fun drawSelection(canvas: Canvas, docPageRect: RectF) {
+        val rect = selectionRect ?: return
+        tmpRect.set(
+            docPageRect.left + rect.left,
+            docPageRect.top + rect.top,
+            docPageRect.left + rect.right,
+            docPageRect.top + rect.bottom,
+        )
+        matrix.mapRect(tmpRect)
+        canvas.drawRect(tmpRect, selectionPaint)
+        canvas.drawRect(tmpRect, selectionStroke)
+    }
+
+    private fun copySelection() {
+        val text = selectionText ?: return
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        cm.setPrimaryClip(ClipData.newPlainText("Lumen", text))
+    }
+
+    private fun clearSelection() {
+        if (selectionPage < 0 && selectionRect == null) return
+        selectionPage = -1
+        selectionRect = null
+        selectionText = null
+        invalidate()
+    }
+
+    /** Finish the action mode if showing (its destroy callback clears the
+     *  selection), else clear directly. */
+    private fun dismissSelection() {
+        val mode = actionMode
+        if (mode != null) mode.finish() else clearSelection()
+    }
+
+    private fun dispatchLinkHit(hit: MuPdfPageRenderer.LinkInfo?) {
+        when {
+            hit == null -> listener?.onSingleTap()
+            hit.isExternal -> listener?.onExternalLinkTap(hit.uri)
+            hit.destPage != null -> listener?.onInternalLinkTap(hit.destPage)
+            else -> listener?.onSingleTap()
+        }
+    }
+
+    private fun prefetchLinks(pageIndex: Int) {
+        val r = renderer ?: return
+        if (linkCache.containsKey(pageIndex)) return
+        if (!linkFetchesInFlight.add(pageIndex)) return
+        scope.launch {
+            val links = r.linksForPage(pageIndex)
+            linkFetchesInFlight.remove(pageIndex)
+            if (this@PdfDocumentView.renderer === r) {
+                linkCache[pageIndex] = links
+            }
         }
     }
 
@@ -960,25 +1216,29 @@ class PdfDocumentView @JvmOverloads constructor(
         val r = renderer ?: run { listener?.onSingleTap(); return }
         scope.launch {
             val links = r.linksForPage(pageIndex)
-            val hit = links.firstOrNull { link ->
+            if (this@PdfDocumentView.renderer === r) {
+                linkCache[pageIndex] = links
+            }
+            dispatchLinkHit(links.firstOrNull { link ->
                 val b = link.bounds
                 pageX >= b.left && pageX <= b.right && pageY >= b.top && pageY <= b.bottom
-            }
-            if (hit == null) {
-                listener?.onSingleTap()
-                return@launch
-            }
-            if (hit.isExternal) {
-                listener?.onExternalLinkTap(hit.uri)
-            } else if (hit.destPage != null) {
-                listener?.onInternalLinkTap(hit.destPage)
-            } else {
-                listener?.onSingleTap()
-            }
+            })
         }
     }
 
     private fun startFling(velocityX: Float, velocityY: Float) {
+        // Horizontal mode at fit zoom behaves as a pager: a decisive fling turns
+        // exactly one page; anything gentler settles on the nearest page.
+        if (scrollHorizontal && currentZoom() <= SNAP_ZOOM_MAX) {
+            val cur = currentPageIndex()
+            val dir = when {
+                velocityX < -PAGE_FLING_VELOCITY -> 1
+                velocityX > PAGE_FLING_VELOCITY -> -1
+                else -> 0
+            }
+            jumpToPage((cur + dir).coerceIn(0, pageCount - 1), animate = true)
+            return
+        }
         matrix.getValues(matrixValues)
         val tx = matrixValues[Matrix.MTRANS_X].toInt()
         val ty = matrixValues[Matrix.MTRANS_Y].toInt()
@@ -1003,6 +1263,7 @@ class PdfDocumentView @JvmOverloads constructor(
                     ViewCompat.postOnAnimation(this@PdfDocumentView, this)
                 } else {
                     flingJob = null
+                    maybeSnapHorizontal()
                 }
             }
         }
@@ -1155,6 +1416,17 @@ class PdfDocumentView @JvmOverloads constructor(
         if (p != lastEmittedPage) {
             lastEmittedPage = p
             listener?.onPageChanged(p, pageCount)
+            contentDescription = "PDF document, page ${p + 1} of $pageCount"
+            announcePageRunnable?.let { removeCallbacks(it) }
+            val announce = Runnable {
+                val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
+                    as? AccessibilityManager
+                if (am?.isEnabled == true) {
+                    announceForAccessibility("Page ${p + 1} of $pageCount")
+                }
+            }
+            announcePageRunnable = announce
+            postDelayed(announce, PAGE_ANNOUNCE_DEBOUNCE_MS)
         }
     }
 
@@ -1191,5 +1463,14 @@ class PdfDocumentView @JvmOverloads constructor(
         private const val THUMB_MARGIN_DP = 3f
         private const val THUMB_MIN_H_DP = 40f
         private const val SCROLLBAR_IDLE_MS = 1500L
+
+        // Horizontal page snapping
+        private const val SNAP_ZOOM_MAX = 1.05f
+        private const val PAGE_FLING_VELOCITY = 800f
+
+        /** Debounce for the screen-reader page announcement. */
+        private const val PAGE_ANNOUNCE_DEBOUNCE_MS = 600L
+
+        private const val MENU_COPY = 1
     }
 }
