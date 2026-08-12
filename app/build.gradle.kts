@@ -60,6 +60,10 @@ android {
         compose = true
         buildConfig = true
     }
+    sourceSets {
+        // MigrationTestHelper reads exported Room schemas as instrumentation assets.
+        getByName("androidTest").assets.srcDir("$projectDir/schemas")
+    }
 }
 
 kotlin {

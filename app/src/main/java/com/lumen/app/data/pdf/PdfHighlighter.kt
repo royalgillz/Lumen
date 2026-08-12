@@ -6,6 +6,7 @@ import android.net.Uri
 import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Quad
 import com.artifex.mupdf.fitz.StructuredText
+import com.lumen.app.data.text.NormalizedMatcher
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -84,33 +85,24 @@ class PdfHighlighter @Inject constructor(
 
     /**
      * Walks the structured-text tree once, building a parallel buffer of
-     * lowercase code points and per-code-unit [Quad] references so a substring
-     * match in the buffer can be mapped back to the union of its source char
-     * quads.
-     *
-     * Multi-word queries are matched per token: search results come from an
-     * AND-of-tokens FTS query, so "climate change" must light up every "climate"
-     * and every "change" on the page — an exact-phrase match would often find
-     * nothing on a page FTS legitimately matched. Matches are returned in
-     * reading order across all tokens; a match fully contained inside another
-     * (from substring-of-each-other tokens) is dropped.
+     * original code points and per-code-unit [Quad] references, then hands the
+     * buffer to [NormalizedMatcher] — the same matcher the results list used to
+     * claim the match, so what the viewer highlights is exactly what matched
+     * (token-start anchoring, prefix extension, punctuation-insensitive:
+     * "F1" lights up "F-1"). Every occurrence of every query token is
+     * highlighted (union semantics); a match fully contained inside another
+     * (from prefix-of-each-other tokens) is dropped.
      *
      * Handles ligature glyphs (fi, fl, ffi…) and supplementary characters
      * (surrogate pairs) by recording one quad per UTF-16 code unit produced.
      */
+    // @spec VIEW-MATCH-001, VIEW-MATCH-004
     private fun extractKeywordRects(
         stext: StructuredText,
         keyword: String,
         offsetX: Float,
         offsetY: Float,
     ): List<RectF> {
-        val needles = keyword.trim()
-            .split(Regex("\\s+"))
-            .map { buildLowercaseString(it) }
-            .filter { it.isNotEmpty() }
-            .distinct()
-        if (needles.isEmpty()) return emptyList()
-
         val buffer = StringBuilder()
         val quads = ArrayList<Quad>(256)
 
@@ -125,14 +117,14 @@ class PdfHighlighter @Inject constructor(
                     if (ch == null) continue
                     val cp = ch.c
                     val quad = ch.quad ?: continue
-                    val lower = Character.toLowerCase(cp)
-                    buffer.appendCodePoint(lower)
-                    repeat(Character.charCount(lower)) { quads.add(quad) }
+                    buffer.appendCodePoint(cp)
+                    repeat(Character.charCount(cp)) { quads.add(quad) }
                 }
-                // Insert a synthetic space between lines so cross-line matches
-                // don't glue end-of-line words together. Quads list grows in
+                // Synthetic newline between lines: still a token separator, but
+                // lets the matcher collapse line-wrap hyphenation ("COVID-\n19")
+                // into one match spanning both lines. Quads list grows in
                 // parallel so the index alignment is preserved.
-                buffer.append(' ')
+                buffer.append('\n')
                 quads.add(SENTINEL_QUAD)
             }
         }
@@ -140,27 +132,16 @@ class PdfHighlighter @Inject constructor(
         val haystack = buffer.toString()
         if (haystack.isEmpty()) return emptyList()
 
-        // Collect every token's matches as [start, endInclusive] index ranges.
-        val matches = ArrayList<IntRange>()
-        for (needle in needles) {
-            if (haystack.length < needle.length) continue
-            var searchFrom = 0
-            while (true) {
-                val idx = haystack.indexOf(needle, searchFrom)
-                if (idx < 0) break
-                val end = idx + needle.length - 1
-                if (end < quads.size) matches.add(idx..end)
-                searchFrom = idx + needle.length
-            }
-        }
+        val matches = NormalizedMatcher.findMatches(haystack, keyword)
+            .filter { it.last < quads.size }
         if (matches.isEmpty()) return emptyList()
 
         // Reading order; longest-first at equal starts so containment is caught
         // by a single max-end sweep.
-        matches.sortWith(compareBy({ it.first }, { -it.last }))
-        val rects = ArrayList<RectF>(matches.size)
+        val ordered = matches.sortedWith(compareBy({ it.first }, { -it.last }))
+        val rects = ArrayList<RectF>(ordered.size)
         var maxEnd = -1
-        for (m in matches) {
+        for (m in ordered) {
             if (m.last <= maxEnd) continue
             maxEnd = m.last
             rects.add(unionRect(quads, m.first, m.last, offsetX, offsetY))
@@ -195,18 +176,6 @@ class PdfHighlighter @Inject constructor(
             maxX + 1f - offsetX,
             maxY - offsetY,
         )
-    }
-
-    private fun buildLowercaseString(s: String): String {
-        val sb = StringBuilder(s.length)
-        val trimmed = s.trim()
-        var i = 0
-        while (i < trimmed.length) {
-            val cp = trimmed.codePointAt(i)
-            sb.appendCodePoint(Character.toLowerCase(cp))
-            i += Character.charCount(cp)
-        }
-        return sb.toString()
     }
 
     private companion object {

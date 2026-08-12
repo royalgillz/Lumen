@@ -51,7 +51,13 @@ class PageTextDaoTest {
         db.pageDao().insert(PageEntity(docId = docId, pageNumber = pageNumber, isOcr = isOcr))
 
     private suspend fun insertText(pageId: Long, text: String) =
-        db.pageTextDao().insert(PageTextEntity(pageId = pageId, text = text))
+        db.pageTextDao().insert(
+            PageTextEntity(
+                pageId = pageId,
+                text = text,
+                textNorm = com.lumen.app.data.text.TextNormalizer.normalize(text),
+            )
+        )
 
     private suspend fun search(query: String, limit: Int = 201) =
         db.pageTextDao().searchPages(

@@ -30,6 +30,7 @@ import com.lumen.app.data.ocr.OcrWordBoxes
 import com.lumen.app.data.ocr.TesseractOcrEngine
 import com.lumen.app.data.pdf.PdfPageRenderer
 import com.lumen.app.data.pdf.PdfTextExtractor
+import com.lumen.app.data.text.TextNormalizer
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.Dispatchers
@@ -180,7 +181,14 @@ class IndexWorker @AssistedInject constructor(
                 // Page-level FTS row: whole-page text so multi-word AND queries
                 // match across line breaks.
                 if (finalText.isNotBlank()) {
-                    pageTextDao.insert(PageTextEntity(pageId = pageId, text = finalText))
+                    // @spec SEARCH-NORM-003
+                    pageTextDao.insert(
+                        PageTextEntity(
+                            pageId = pageId,
+                            text = finalText,
+                            textNorm = TextNormalizer.normalize(finalText),
+                        )
+                    )
                 }
             }
         }

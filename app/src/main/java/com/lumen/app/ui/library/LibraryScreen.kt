@@ -76,8 +76,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.domain.model.LibraryCounts
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
+import com.lumen.app.ui.common.quantity
 import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
@@ -190,8 +192,11 @@ fun LibraryScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Icon(Icons.Default.Warning, contentDescription = null, tint = Terracotta, modifier = Modifier.size(18.dp))
+                    // Lost-permission documents stay in the indexed bucket (still
+                    // searchable); this banner, not the count model, carries the condition.
+                    // @spec LIB-CNT-005
                     Text(
-                        text = "${lostPermissionFolders.size} folder${if (lostPermissionFolders.size > 1) "s" else ""} " +
+                        text = "${quantity(lostPermissionFolders.size, "folder")} " +
                             "lost access — remove and re-add in Settings › Data.",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onBackground,
@@ -375,10 +380,20 @@ private fun LibraryStats(
     totalWords: Int,
     ocrPages: Int,
 ) {
-    val indexed = documents.count { it.status == DocumentEntity.STATUS_INDEXED }
-    val pending = documents.count {
-        it.status == DocumentEntity.STATUS_PENDING || it.status == DocumentEntity.STATUS_INDEXING
-    }
+    // One status-bucketed derivation feeds every number on this card; the
+    // buckets read as a single sentence so 313-vs-312 explains itself instead
+    // of eroding trust. Failed documents are named, never silently missing.
+    // @spec LIB-CNT-001, LIB-CNT-002, LIB-CNT-006
+    val counts = LibraryCounts(
+        total = documents.size,
+        indexed = documents.count { it.status == DocumentEntity.STATUS_INDEXED },
+        failed = documents.count {
+            it.status == DocumentEntity.STATUS_ENCRYPTED || it.status == DocumentEntity.STATUS_ERROR
+        },
+        pending = documents.count {
+            it.status == DocumentEntity.STATUS_PENDING || it.status == DocumentEntity.STATUS_INDEXING
+        },
+    )
 
     Surface(
         modifier = Modifier
@@ -388,16 +403,19 @@ private fun LibraryStats(
         tonalElevation = 1.dp,
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                StatItem(count = indexed, label = "Indexed")
-                StatDivider()
-                StatItem(count = folderCount, label = "Folders")
-                StatDivider()
-                StatItem(count = pending, label = "Pending", useAccent = pending > 0)
+            counts.summarySentence()?.let { sentence ->
+                Text(
+                    text = sentence,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = quantity(folderCount, "folder"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             if (totalPages > 0) {
@@ -418,24 +436,6 @@ private fun LibraryStats(
             }
         }
     }
-}
-
-@Composable
-private fun StatItem(count: Int, label: String, useAccent: Boolean = false) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = count.toString(),
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = if (useAccent) Terracotta else MaterialTheme.colorScheme.onSurface,
-        )
-        Text(text = label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun StatDivider() {
-    Box(modifier = Modifier.width(1.dp).height(36.dp).background(MaterialTheme.colorScheme.outlineVariant))
 }
 
 @Composable
@@ -713,7 +713,7 @@ private fun DocumentGridCard(
 
 private fun statusLabel(doc: DocumentEntity): String {
     val base = when (doc.status) {
-        DocumentEntity.STATUS_INDEXED -> "${doc.pageCount} pages"
+        DocumentEntity.STATUS_INDEXED -> quantity(doc.pageCount, "page")
         DocumentEntity.STATUS_INDEXING -> "Indexing…"
         DocumentEntity.STATUS_ENCRYPTED -> "Encrypted, cannot index"
         DocumentEntity.STATUS_ERROR -> "Failed, tap to retry"

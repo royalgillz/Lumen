@@ -5,6 +5,9 @@ import android.provider.DocumentsContract
 import com.lumen.app.data.db.dao.DocumentDao
 import com.lumen.app.data.db.dao.PageSearchRow
 import com.lumen.app.data.db.dao.PageTextDao
+import com.lumen.app.data.text.NormalizedMatcher
+import com.lumen.app.data.text.SnippetBuilder
+import com.lumen.app.data.text.TextNormalizer
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
@@ -55,14 +58,19 @@ class SearchRepository @Inject constructor(
         val contentTruncated = rows.size > CANDIDATE_LIMIT
         val candidates = if (contentTruncated) rows.take(CANDIDATE_LIMIT) else rows
 
+        // Filename matching shares content search's definition of "matches":
+        // both sides pass through TextNormalizer, so "I20" finds "I-20.pdf".
+        // The extension is stripped first — merging name and extension would
+        // let "pdf" match every file and create boundary artifacts ("20p").
         val queryTokens = rawQuery.lowercase()
             .split(Regex("\\s+"))
-            .filter { it.isNotEmpty() }
+            .mapNotNull { TextNormalizer.normalize(it).ifEmpty { null } }
 
         // Filename search complements content search. Skip when OCR-only filter is
         // active. Token matching runs in Kotlin because SQLite's lower() is
         // ASCII-only and instr() would force contiguous-phrase semantics; here each
-        // token may appear anywhere in the (locale-aware lowercased) filename.
+        // token may appear anywhere in the (locale-aware lowercased) basename.
+        // @spec SEARCH-QRY-004
         val filenameRows = if (filters.ocrOnly || queryTokens.isEmpty()) {
             emptyList()
         } else {
@@ -72,8 +80,8 @@ class SearchRepository @Inject constructor(
                 minIndexedAt = minIndexedAt,
             )
                 .filter { row ->
-                    val filenameLower = row.filename.lowercase()
-                    queryTokens.all { filenameLower.contains(it) }
+                    val basename = normalizedBasename(row.filename)
+                    queryTokens.all { basename.contains(it) }
                 }
                 .filter { row -> candidates.none { it.docId == row.id } }
                 .take(FILENAME_MATCH_LIMIT)
@@ -133,7 +141,7 @@ class SearchRepository @Inject constructor(
                     filename = row.filename,
                     pageNumber = row.pageNumber,
                     lineNumber = 0,
-                    snippet = row.snippet,
+                    snippet = "", // filled from original text below, displayed rows only
                     isOcr = row.isOcr,
                     folderName = treeUriToFolderName(row.treeUri),
                     isFilenameMatch = false,
@@ -147,29 +155,63 @@ class SearchRepository @Inject constructor(
         }
 
         val truncated = contentTruncated || combined.size > RESULT_LIMIT
-        val results = combined.take(RESULT_LIMIT)
+        val results = buildSnippets(combined.take(RESULT_LIMIT), rawQuery)
         return Output(results, truncated)
+    }
+
+    /**
+     * Second phase of the search: snippets come from ORIGINAL page text (the
+     * FTS column holds normalized text), built in Kotlin for just the displayed
+     * rows. Spans come from NormalizedMatcher, so what's bold is exactly what
+     * matched; when the matcher finds nothing despite the FTS hit, the row
+     * keeps a start-of-page snippet rather than being dropped.
+     */
+    // @spec SEARCH-SNIP-003, SEARCH-MATCH-004
+    private suspend fun buildSnippets(
+        results: List<SearchResult>,
+        rawQuery: String,
+    ): List<SearchResult> {
+        val pageIds = results.filter { !it.isFilenameMatch }.map { it.lineId }
+        if (pageIds.isEmpty()) return results
+        val textById = pageTextDao.textsForPages(pageIds).associate { it.pageId to it.text }
+        return results.map { result ->
+            val text = if (result.isFilenameMatch) null else textById[result.lineId]
+            if (text == null) {
+                result
+            } else {
+                val spans = NormalizedMatcher.findMatches(text, rawQuery)
+                val snippet = SnippetBuilder.build(text, spans)
+                result.copy(snippet = snippet.text, snippetHighlights = snippet.highlights)
+            }
+        }
     }
 
     suspend fun searchPagesInDocument(sanitizedQuery: String, docUri: String): List<Int> =
         pageTextDao.searchPagesInDocument(sanitizedQuery, docUri)
 
-    /** Precomputed matchinfo hits on the page + a boost per token that also
-     *  appears in the filename. */
+    /** Precomputed matchinfo hits on the page + a boost per normalized token
+     *  that also appears in the normalized basename. */
     private fun relevanceScore(row: PageSearchRow, hits: Int, queryTokens: List<String>): Int {
         var score = hits
         if (queryTokens.isNotEmpty()) {
-            val filenameLower = row.filename.lowercase()
-            score += queryTokens.count { filenameLower.contains(it) } * FILENAME_TOKEN_BOOST
+            val basename = normalizedBasename(row.filename)
+            score += queryTokens.count { basename.contains(it) } * FILENAME_TOKEN_BOOST
         }
         return score
     }
+
+    /** Extension stripped, then normalized + lowercased — the filename side of
+     *  SEARCH-QRY-004's "one definition of matches". */
+    private fun normalizedBasename(filename: String): String =
+        TextNormalizer.normalize(filename.substringBeforeLast('.')).lowercase()
 
     /**
      * Parse an FTS4 matchinfo blob in 'pcx' format: [p][c] then, per phrase and
      * column, [hits this row][hits all rows][docs with hits] — 32-bit LE ints.
      * Returns the sum of this-row hits across all phrases (our only column is 0).
+     * This exact total is what the per-page badge shows — never capped or rounded.
      */
+    // @spec SEARCH-CNT-001
     private fun matchInfoTotalHits(blob: ByteArray?): Int {
         if (blob == null || blob.size < 8) return 0
         return try {

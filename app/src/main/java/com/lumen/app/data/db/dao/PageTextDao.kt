@@ -20,7 +20,6 @@ interface PageTextDao {
     // toward alphabetically-early documents.
     @Query("""
         SELECT t.pageId AS pageId, p.pageNumber, p.isOcr,
-               snippet(page_text_fts, '<b>', '</b>', '...', 0, 18) AS snippet,
                matchinfo(page_text_fts, 'pcx') AS matchInfo,
                d.id AS docId, d.uri, d.filename, d.treeUri, d.indexedAt
         FROM page_text_fts
@@ -43,6 +42,13 @@ interface PageTextDao {
         limit: Int,
     ): List<PageSearchRow>
 
+    // Original text for the displayed rows only — snippets are built in Kotlin
+    // from original text (the FTS column holds normalized text), and fetching
+    // the whole candidate pool would move megabytes per keystroke.
+    // @spec SEARCH-SNIP-003
+    @Query("SELECT pageId, text FROM page_text WHERE pageId IN (:pageIds)")
+    suspend fun textsForPages(pageIds: List<Long>): List<PageTextRow>
+
     @Query("""
         SELECT p.pageNumber
         FROM page_text_fts
@@ -60,11 +66,15 @@ data class PageSearchRow(
     val pageId: Long,
     val pageNumber: Int,
     val isOcr: Boolean,
-    val snippet: String,
     val matchInfo: ByteArray?,
     val docId: Long,
     val uri: String,
     val filename: String,
     val treeUri: String,
     val indexedAt: Long?,
+)
+
+data class PageTextRow(
+    val pageId: Long,
+    val text: String,
 )

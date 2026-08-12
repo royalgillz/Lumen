@@ -58,6 +58,9 @@ class PdfDocumentView @JvmOverloads constructor(
         fun onExternalLinkTap(uri: String)
         fun onInternalLinkTap(pageIndex: Int)
         fun onZoomChanged(zoom: Float)
+        /** True while the fast-scroll thumb is being dragged or a fling is
+         *  running — the chrome layer yields to the thumb during scroll. */
+        fun onScrollActivityChanged(active: Boolean) {}
     }
 
     private var listener: Listener? = null
@@ -244,6 +247,16 @@ class PdfDocumentView @JvmOverloads constructor(
         listener = l
     }
 
+    // @spec VIEW-PILL-004
+    private var scrollActivityReported = false
+    private fun emitScrollActivity() {
+        val active = isDraggingThumb || flingJob != null
+        if (active != scrollActivityReported) {
+            scrollActivityReported = active
+            listener?.onScrollActivityChanged(active)
+        }
+    }
+
     /**
      * Theme the canvas surround. The background was hardcoded dark, which clashed
      * with the light theme (and contradicted the Drive-style neutral-surround
@@ -263,6 +276,7 @@ class PdfDocumentView @JvmOverloads constructor(
         bitmapCache.evictAll()
         flingJob?.let { removeCallbacks(it) }
         flingJob = null
+        emitScrollActivity()
         scroller.forceFinished(true)
         animator?.cancel()
         animator = null
@@ -477,6 +491,7 @@ class PdfDocumentView @JvmOverloads constructor(
         runCatching { context.unregisterComponentCallbacks(memoryCallbacks) }
         flingJob?.let { removeCallbacks(it) }
         flingJob = null
+        emitScrollActivity()
         announcePageRunnable?.let { removeCallbacks(it) }
         announcePageRunnable = null
         removeCallbacks(hideScrollbarRunnable)
@@ -548,6 +563,7 @@ class PdfDocumentView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 if (thumbIsScrollable() && scrollbarAlpha > 0.05f && thumbHitRect().contains(event.x, event.y)) {
                     isDraggingThumb = true
+                    emitScrollActivity()
                     thumbGrabOffsetY = event.y - thumbTopPx()
                     parent?.requestDisallowInterceptTouchEvent(true)
                     scroller.forceFinished(true)
@@ -569,6 +585,7 @@ class PdfDocumentView @JvmOverloads constructor(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 if (isDraggingThumb) {
                     isDraggingThumb = false
+                    emitScrollActivity()
                     parent?.requestDisallowInterceptTouchEvent(false)
                     pokeScrollbar()
                     invalidate()
@@ -1263,11 +1280,13 @@ class PdfDocumentView @JvmOverloads constructor(
                     ViewCompat.postOnAnimation(this@PdfDocumentView, this)
                 } else {
                     flingJob = null
+                    emitScrollActivity()
                     maybeSnapHorizontal()
                 }
             }
         }
         flingJob = job
+        emitScrollActivity()
         ViewCompat.postOnAnimation(this, job)
     }
 

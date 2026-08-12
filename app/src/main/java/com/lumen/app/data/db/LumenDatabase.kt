@@ -13,6 +13,7 @@ import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.db.entity.PageEntity
 import com.lumen.app.data.db.entity.PageTextEntity
 import com.lumen.app.data.db.entity.PageTextFtsEntity
+import com.lumen.app.data.text.TextNormalizer
 
 @Database(
     entities = [
@@ -22,7 +23,7 @@ import com.lumen.app.data.db.entity.PageTextFtsEntity
         PageTextFtsEntity::class,
         BookmarkEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 abstract class LumenDatabase : RoomDatabase() {
@@ -83,6 +84,29 @@ abstract class LumenDatabase : RoomDatabase() {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("DROP TABLE IF EXISTS `lines_fts`")
                 database.execSQL("DROP TABLE IF EXISTS `lines`")
+            }
+        }
+
+        // Normalized search text: adds page_text.textNorm (backfilled in SQL from
+        // TextNormalizer's replace chain) and points the FTS index at it, so
+        // punctuated identifiers (F-1, 802.11) match their compact forms. Pure
+        // SQL inside the migration transaction: no window where search runs
+        // against an unbuilt index, and interruption rolls back cleanly.
+        // @spec SEARCH-IDX-001, SEARCH-IDX-002
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE page_text ADD COLUMN textNorm TEXT NOT NULL DEFAULT ''"
+                )
+                database.execSQL(
+                    "UPDATE page_text SET textNorm = ${TextNormalizer.sqlNormExpr("text")}"
+                )
+                database.execSQL("DROP TABLE IF EXISTS `page_text_fts`")
+                database.execSQL(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS `page_text_fts` " +
+                        "USING FTS4(`textNorm` TEXT NOT NULL, tokenize=unicode61, content=`page_text`)"
+                )
+                database.execSQL("INSERT INTO page_text_fts(page_text_fts) VALUES('rebuild')")
             }
         }
 

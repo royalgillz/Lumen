@@ -2,6 +2,7 @@ package com.lumen.app.ui.viewer
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.view.WindowManager
@@ -196,6 +197,23 @@ fun PdfViewerScreen(
     var showControls by remember { mutableStateOf(true) }
     var controlsTouchTick by remember { mutableIntStateOf(0) }
     var zoomPercent by remember { mutableIntStateOf(100) }
+    // True while the fast-scroll thumb is dragged or a fling runs — the zoom
+    // pill yields to the thumb (they share the right edge).
+    var scrollActivity by remember { mutableStateOf(false) }
+
+    // Auto-hiding chrome is unreachable under TalkBack: the canvas-tap toggle is
+    // unannounced and a hidden pill leaves the semantics tree. Keep chrome up.
+    // @spec VIEW-PILL-003
+    var touchExplorationEnabled by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
+            as android.view.accessibility.AccessibilityManager
+        touchExplorationEnabled = am.isTouchExplorationEnabled
+        val listener = android.view.accessibility.AccessibilityManager
+            .TouchExplorationStateChangeListener { touchExplorationEnabled = it }
+        am.addTouchExplorationStateChangeListener(listener)
+        onDispose { am.removeTouchExplorationStateChangeListener(listener) }
+    }
 
     val pdfDocView = remember { mutableStateOf<PdfDocumentView?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -293,9 +311,13 @@ fun PdfViewerScreen(
     }
 
     // Auto-hide controls after 4.2s — but never while an error or password
-    // prompt is shown, since the toolbar is the only way out.
-    LaunchedEffect(showControls, controlsTouchTick, isFailed, isLocked, showOverflowMenu) {
-        if (showControls && !isViewerSearchActive && !isFailed && !isLocked && !showOverflowMenu) {
+    // prompt is shown (the toolbar is the only way out), and never under
+    // touch exploration (hidden chrome is unreachable to a screen reader).
+    // @spec VIEW-PILL-001, VIEW-PILL-003
+    LaunchedEffect(showControls, controlsTouchTick, isFailed, isLocked, showOverflowMenu, touchExplorationEnabled) {
+        if (showControls && !isViewerSearchActive && !isFailed && !isLocked &&
+            !showOverflowMenu && !touchExplorationEnabled
+        ) {
             delay(4200)
             showControls = false
             showBrightnessSlider = false
@@ -607,8 +629,17 @@ fun PdfViewerScreen(
                                     override fun onInternalLinkTap(pageIndex: Int) {
                                         v.jumpToPage(pageIndex, animate = true)
                                     }
+                                    // Zoom activity counts as interaction: show the
+                                    // controls (with the pill's readout) and restart
+                                    // the auto-hide timer.
+                                    // @spec VIEW-PILL-002
                                     override fun onZoomChanged(zoom: Float) {
                                         zoomPercent = (zoom * 100).roundToInt().coerceAtLeast(1)
+                                        showControls = true
+                                        controlsTouchTick++
+                                    }
+                                    override fun onScrollActivityChanged(active: Boolean) {
+                                        scrollActivity = active
                                     }
                                 })
                                 v.setCanvasColors(canvasBackground, canvasDivider)
@@ -628,10 +659,17 @@ fun PdfViewerScreen(
 
             if (!isFailed && !isLocked && parsedUriIsValid) {
                 // Zoom pill: − · % · +. Tapping the percentage snaps back to 100%.
+                // One chrome lifecycle: the pill shows and fades with the top-bar
+                // controls, and yields to the fast-scroll thumb mid-scroll.
+                // @spec VIEW-PILL-001, VIEW-PILL-004
+                AnimatedVisibility(
+                    visible = (showControls || isViewerSearchActive) && !scrollActivity,
+                    modifier = Modifier.align(Alignment.BottomEnd),
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                ) {
                 Surface(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(16.dp),
+                    modifier = Modifier.padding(16.dp),
                     shape = RoundedCornerShape(percent = 50),
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
@@ -686,6 +724,7 @@ fun PdfViewerScreen(
                             )
                         }
                     }
+                }
                 }
             }
 

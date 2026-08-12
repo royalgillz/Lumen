@@ -97,6 +97,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.data.db.FtsQuerySanitizer
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.domain.model.IndexedWithin
 import com.lumen.app.domain.model.SearchFilters
@@ -104,6 +105,7 @@ import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
+import com.lumen.app.ui.common.quantity
 import com.lumen.app.ui.icons.LumenBrandIcon
 import com.lumen.app.ui.theme.AmberAccent
 import com.lumen.app.ui.theme.Terracotta
@@ -204,7 +206,12 @@ fun SearchScreen(
                     onRemove = { viewModel.removeHistoryItem(it) },
                     onClearAll = { viewModel.clearHistory() },
                 )
-                query.trim().length < 2 -> SearchEmptyState(
+                // A query that normalizes to nothing (pure punctuation) is an
+                // empty query from the index's point of view — idle home, not
+                // stale results or a misleading "no results".
+                // @spec SEARCH-QRY-003
+                query.trim().length < 2 || FtsQuerySanitizer.tokenize(query).isEmpty() ->
+                    SearchEmptyState(
                     indexedCount = indexedCount,
                     recentSearches = searchHistory,
                     recentDocuments = recentDocuments,
@@ -361,10 +368,13 @@ private fun SearchHeader(
             }
         }
 
+        // Steady-state copy in the interface font: "ready", never an implied
+        // activity; the privacy promise in plain words, never "offline".
+        // @spec SEARCH-UI-001, SEARCH-UI-002
         if (indexedCount != null && indexedCount > 0) {
             Text(
-                text = "Searching across $indexedCount ${if (indexedCount == 1) "PDF" else "PDFs"} · offline",
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
+                text = "${quantity(indexedCount, "PDF")} ready · everything stays on this device",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
             )
@@ -740,8 +750,8 @@ private fun PageMatchRow(
                     )
                     Text(
                         text = buildHighlightedSnippet(
-                            query = query,
                             snippet = result.snippet,
+                            highlights = result.snippetHighlights,
                             highlightColor = AmberAccent.copy(alpha = 0.18f),
                             highlightTextColor = MaterialTheme.colorScheme.onBackground,
                         ),
@@ -894,8 +904,8 @@ fun ResultRow(
                             androidx.compose.ui.text.AnnotatedString(result.snippet)
                         } else {
                             buildHighlightedSnippet(
-                                query = query,
                                 snippet = result.snippet,
+                                highlights = result.snippetHighlights,
                                 highlightColor = AmberAccent.copy(alpha = 0.18f),
                                 highlightTextColor = MaterialTheme.colorScheme.onBackground,
                             )
@@ -1399,35 +1409,25 @@ private fun NoResultsState(
     }
 }
 
+// Styles the plain snippet text from its highlight ranges. The snippet string
+// itself carries no markup — copy/share uses it verbatim (SEARCH-SNIP-002).
 private fun buildHighlightedSnippet(
-    query: String,
     snippet: String,
+    highlights: List<IntRange>,
     highlightColor: Color,
     highlightTextColor: Color,
 ): androidx.compose.ui.text.AnnotatedString = buildAnnotatedString {
-    append("“…")
-    if (snippet.isBlank()) {
-        append("…”")
-        return@buildAnnotatedString
-    }
-    // Parse <b>...</b> markers from FTS4 snippet
+    append("“")
     var i = 0
-    while (i < snippet.length) {
-        val bOpen = snippet.indexOf("<b>", i)
-        if (bOpen == -1) {
-            append(snippet.substring(i))
-            break
-        }
-        if (bOpen > i) append(snippet.substring(i, bOpen))
-        val bClose = snippet.indexOf("</b>", bOpen)
-        if (bClose == -1) {
-            append(snippet.substring(bOpen))
-            break
-        }
+    for (range in highlights) {
+        val start = range.first.coerceIn(0, snippet.length)
+        val endExclusive = (range.last + 1).coerceIn(start, snippet.length)
+        if (start > i) append(snippet.substring(i, start))
         withStyle(SpanStyle(color = highlightTextColor, fontWeight = FontWeight.SemiBold, background = highlightColor)) {
-            append(snippet.substring(bOpen + 3, bClose))
+            append(snippet.substring(start, endExclusive))
         }
-        i = bClose + 4
+        i = endExclusive
     }
-    append("…”")
+    if (i < snippet.length) append(snippet.substring(i))
+    append("”")
 }

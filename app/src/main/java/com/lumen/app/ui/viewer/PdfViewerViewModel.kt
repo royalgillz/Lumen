@@ -15,6 +15,7 @@ import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.ocr.OcrWordBoxes
 import com.lumen.app.data.pdf.PdfHighlighter
 import com.lumen.app.data.repository.SearchRepository
+import com.lumen.app.data.text.NormalizedMatcher
 import com.lumen.app.di.ApplicationScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineScope
@@ -260,6 +261,9 @@ class PdfViewerViewModel @Inject constructor(
             return
         }
         val parsedUri = runCatching { Uri.parse(docUri) }.getOrNull() ?: run { resetSearch(); return }
+        // Same gate as content search: no token with ≥ 2 normalized chars → no
+        // search (sanitize returns null for those and for zero-token queries).
+        // @spec VIEW-MATCH-005
         val sanitized = FtsQuerySanitizer.sanitize(trimmed) ?: run { resetSearch(); return }
         searchDocUri = docUri
         searchUri = parsedUri
@@ -335,9 +339,10 @@ class PdfViewerViewModel @Inject constructor(
      * reader isn't waiting on a full scan of a large file. Scanned pages without
      * a text layer yield no words and simply never match.
      */
+    // @spec VIEW-MATCH-003
     private suspend fun scanOpenDocument(keyword: String): List<Int> {
         val renderer = currentRenderer ?: return emptyList()
-        val needles = keyword.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        val needles = NormalizedMatcher.tokensOf(keyword)
         if (needles.isEmpty()) return emptyList()
         val found = mutableListOf<Int>()
         _isScanningFallback.value = true
@@ -346,7 +351,9 @@ class PdfViewerViewModel @Inject constructor(
                 currentCoroutineContext().ensureActive()
                 val words = runCatching { renderer.wordsForPage(p) }.getOrNull().orEmpty()
                 if (words.isEmpty()) continue
-                val matches = needles.all { n -> words.any { it.text.lowercase().contains(n) } }
+                val matches = needles.all { n ->
+                    words.any { NormalizedMatcher.findMatches(it.text, n).isNotEmpty() }
+                }
                 if (!matches) continue
                 found += p
                 _matchPages.value = found.toList()
@@ -439,11 +446,13 @@ class PdfViewerViewModel @Inject constructor(
      * Returns null when [page] is not an OCR page (caller falls back to text);
      * returns a (possibly empty-rect) result when it is, so we never recompute it.
      */
+    // @spec VIEW-MATCH-002
     private suspend fun ocrHighlightsForPage(page: Int, keyword: String): PdfHighlighter.PageHighlights? {
         val renderer = currentRenderer ?: return null
         // Token-based like the text-layer path: OCR boxes are per word, so a
-        // multi-word query can never match a single box — match each token instead.
-        val needles = keyword.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        // multi-word query can never match a single box — match each token instead,
+        // through the same NormalizedMatcher ("f1" must find a box reading "F-1").
+        val needles = NormalizedMatcher.tokensOf(keyword)
         if (needles.isEmpty()) return null
         val rows = runCatching { pageDao.ocrWordBoxes(searchDocUri, listOf(page)) }.getOrNull()
         val row = rows?.firstOrNull() ?: return null
@@ -452,7 +461,7 @@ class PdfViewerViewModel @Inject constructor(
         val h = size.height
         if (w <= 0f || h <= 0f) return PdfHighlighter.PageHighlights(page, emptyList(), 0f, 0f)
         val rects = OcrWordBoxes.decode(row.wordBoxesJson)
-            .filter { box -> needles.any { box.text.lowercase().contains(it) } }
+            .filter { box -> needles.any { NormalizedMatcher.findMatches(box.text, it).isNotEmpty() } }
             .map { RectF(it.left * w, it.top * h, it.right * w, it.bottom * h) }
         return PdfHighlighter.PageHighlights(page, rects, w, h)
     }

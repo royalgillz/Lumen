@@ -8,7 +8,10 @@ data class SearchResult(
     // 0-indexed internally; display as pageNumber + 1
     val pageNumber: Int,
     val lineNumber: Int,
+    // Plain snippet text — no markup; copy/share uses it verbatim.
     val snippet: String,
+    // Match spans within [snippet]; bold/highlight styling is applied at render time.
+    val snippetHighlights: List<IntRange> = emptyList(),
     val isOcr: Boolean,
     val folderName: String,
     val isFilenameMatch: Boolean = false,
