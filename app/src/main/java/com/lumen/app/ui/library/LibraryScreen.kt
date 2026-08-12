@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -111,9 +112,6 @@ fun LibraryScreen(
     val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
     val folderStats by viewModel.folderStats.collectAsState()
     val sortOrder by viewModel.sortOrder.collectAsState()
-    val selectedDocument by viewModel.selectedDocument.collectAsState()
-    val selectedDocOcrPages by viewModel.selectedDocOcrPages.collectAsState()
-    val selectedDocBookmarks by viewModel.selectedDocBookmarks.collectAsState()
     val bookmarkCounts by viewModel.bookmarkCounts.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -127,34 +125,7 @@ fun LibraryScreen(
         uri?.let { viewModel.addFolder(it) }
     }
 
-    // Document detail bottom sheet
-    if (selectedDocument != null) {
-        ModalBottomSheet(onDismissRequest = { viewModel.hideDocumentDetail() }) {
-            DocumentDetailSheet(
-                doc = selectedDocument!!,
-                ocrPageCount = selectedDocOcrPages,
-                bookmarks = selectedDocBookmarks,
-                onReindex = {
-                    // Re-index THIS document only: reset its status and enqueue a
-                    // non-force pass, which skips unchanged neighbours. The old
-                    // behaviour force-reindexed the whole folder.
-                    selectedDocument?.let { viewModel.retryDocument(it) }
-                    viewModel.hideDocumentDetail()
-                },
-                onOpenPdf = {
-                    val doc = selectedDocument ?: return@DocumentDetailSheet
-                    onOpenDocument(doc.uri, doc.filename, 0)
-                    viewModel.hideDocumentDetail()
-                },
-                onOpenAtPage = { page ->
-                    val doc = selectedDocument ?: return@DocumentDetailSheet
-                    onOpenDocument(doc.uri, doc.filename, page)
-                    viewModel.hideDocumentDetail()
-                },
-                onDismiss = { viewModel.hideDocumentDetail() },
-            )
-        }
-    }
+    LibraryDocumentSheetHost(viewModel = viewModel, onOpenDocument = onOpenDocument)
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -193,26 +164,7 @@ fun LibraryScreen(
             }
 
             if (lostPermissionFolders.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Terracotta.copy(alpha = 0.15f))
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Icon(Icons.Default.Warning, contentDescription = null, tint = Terracotta, modifier = Modifier.size(18.dp))
-                    // Lost-permission documents stay in the indexed bucket (still
-                    // searchable); this banner, not the count model, carries the condition.
-                    // @spec LIB-CNT-005
-                    Text(
-                        text = "${quantity(lostPermissionFolders.size, "folder")} " +
-                            "lost access — remove and re-add in Settings › Data.",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+                LostAccessBanner(folderCount = lostPermissionFolders.size)
             }
 
             if (!isContentLoaded) {
@@ -240,122 +192,18 @@ fun LibraryScreen(
                             },
                             sortOrder,
                         )
-                        item {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    text = if (bookmarkedOnly) {
-                                        "Bookmarked (${visibleDocuments.size})"
-                                    } else {
-                                        "Documents (${visibleDocuments.size})"
-                                    },
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box {
-                                        var showSortMenu by remember { mutableStateOf(false) }
-                                        IconButton(onClick = { showSortMenu = true }) {
-                                            Icon(
-                                                imageVector = Icons.AutoMirrored.Filled.Sort,
-                                                contentDescription = "Sort documents",
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                        DropdownMenu(
-                                            expanded = showSortMenu,
-                                            onDismissRequest = { showSortMenu = false },
-                                        ) {
-                                            sortOptionLabels.forEach { (order, label) ->
-                                                DropdownMenuItem(
-                                                    text = { Text(label) },
-                                                    leadingIcon = {
-                                                        if (order == sortOrder) {
-                                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                                                        } else {
-                                                            Spacer(Modifier.size(18.dp))
-                                                        }
-                                                    },
-                                                    onClick = {
-                                                        showSortMenu = false
-                                                        viewModel.setSortOrder(order)
-                                                    },
-                                                )
-                                            }
-                                        }
-                                    }
-                                    IconButton(onClick = { bookmarkedOnly = !bookmarkedOnly }) {
-                                        Icon(
-                                            imageVector = if (bookmarkedOnly) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                                            contentDescription = if (bookmarkedOnly) {
-                                                "Show all documents"
-                                            } else {
-                                                "Show only bookmarked documents"
-                                            },
-                                            tint = if (bookmarkedOnly) {
-                                                MaterialTheme.colorScheme.primary
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            },
-                                        )
-                                    }
-                                    IconButton(onClick = { gridMode = !gridMode }) {
-                                        Icon(
-                                            imageVector = if (gridMode) Icons.Default.ViewAgenda else Icons.Default.GridView,
-                                            contentDescription = if (gridMode) "Switch to list view" else "Switch to grid view",
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        if (bookmarkedOnly && visibleDocuments.isEmpty()) {
-                            item {
-                                Text(
-                                    "No bookmarked documents yet. Open a PDF and tap the bookmark icon in the top bar.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                )
-                            }
-                        }
-                        if (!gridMode) {
-                            items(visibleDocuments, key = { it.id }) { doc ->
-                                DocumentRow(
-                                    doc = doc,
-                                    bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
-                                    onRetry = if (doc.status == DocumentEntity.STATUS_ERROR) {
-                                        { viewModel.retryDocument(doc) }
-                                    } else null,
-                                    onTap = { viewModel.showDocumentDetail(doc) },
-                                )
-                            }
-                        } else {
-                            items(visibleDocuments.chunked(2), key = { it.first().id }) { chunk ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    chunk.forEach { doc ->
-                                        DocumentGridCard(
-                                            doc = doc,
-                                            bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
-                                            modifier = Modifier.weight(1f),
-                                            onTap = { viewModel.showDocumentDetail(doc) },
-                                        )
-                                    }
-                                    if (chunk.size == 1) {
-                                        Spacer(Modifier.weight(1f))
-                                    }
-                                }
-                            }
-                        }
+                        libraryDocumentsItems(
+                            visibleDocuments = visibleDocuments,
+                            bookmarkCounts = bookmarkCounts,
+                            bookmarkedOnly = bookmarkedOnly,
+                            gridMode = gridMode,
+                            sortOrder = sortOrder,
+                            onToggleBookmarkedOnly = { bookmarkedOnly = !bookmarkedOnly },
+                            onToggleGrid = { gridMode = !gridMode },
+                            onSetSortOrder = { viewModel.setSortOrder(it) },
+                            onTapDocument = { viewModel.showDocumentDetail(it) },
+                            onRetryDocument = { viewModel.retryDocument(it) },
+                        )
                     }
                 }
             }
@@ -411,7 +259,7 @@ private fun IndexingBottomBar() {
 // replaces the former Error Center and Words tile).
 // @spec LIB-CNT-001, LIB-CNT-002, LIB-CNT-006, LIB-HLTH-001, LIB-HLTH-005
 @Composable
-private fun IndexHealthCard(
+internal fun IndexHealthCard(
     documents: List<DocumentEntity>,
     folderStats: List<FolderStatsRow>,
     onReindexFolder: (String) -> Unit,
@@ -917,7 +765,7 @@ private fun formatBytes(bytes: Long): String = when {
 }
 
 @Composable
-private fun LibraryEmptyState(onAdd: () -> Unit) {
+internal fun LibraryEmptyState(onAdd: () -> Unit) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(72.dp), tint = MaterialTheme.colorScheme.outlineVariant)
@@ -925,6 +773,205 @@ private fun LibraryEmptyState(onAdd: () -> Unit) {
             Text("No folders added yet", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
             Text("Tap + Add Folder to pick a folder full of PDFs", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+// ── Shared with the merged Documents screen ─────────────────────────────────
+// One definition per behavior: the LIB specs hold on every surface that shows
+// library content because the surfaces render these, not copies of them.
+
+@Composable
+internal fun LostAccessBanner(folderCount: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Terracotta.copy(alpha = 0.15f))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(Icons.Default.Warning, contentDescription = null, tint = Terracotta, modifier = Modifier.size(18.dp))
+        // Lost-permission documents stay in the indexed bucket (still
+        // searchable); this banner, not the count model, carries the condition.
+        // @spec LIB-CNT-005
+        Text(
+            text = "${quantity(folderCount, "folder")} " +
+                "lost access — remove and re-add in Settings › Data.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** The document detail bottom sheet, hosted by any screen showing library rows. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun LibraryDocumentSheetHost(
+    viewModel: LibraryViewModel,
+    onOpenDocument: (uri: String, filename: String, page: Int) -> Unit,
+) {
+    val selectedDocument by viewModel.selectedDocument.collectAsState()
+    val selectedDocOcrPages by viewModel.selectedDocOcrPages.collectAsState()
+    val selectedDocBookmarks by viewModel.selectedDocBookmarks.collectAsState()
+    if (selectedDocument != null) {
+        ModalBottomSheet(onDismissRequest = { viewModel.hideDocumentDetail() }) {
+            DocumentDetailSheet(
+                doc = selectedDocument!!,
+                ocrPageCount = selectedDocOcrPages,
+                bookmarks = selectedDocBookmarks,
+                onReindex = {
+                    // Re-index THIS document only: reset its status and enqueue a
+                    // non-force pass, which skips unchanged neighbours.
+                    selectedDocument?.let { viewModel.retryDocument(it) }
+                    viewModel.hideDocumentDetail()
+                },
+                onOpenPdf = {
+                    val doc = selectedDocument ?: return@DocumentDetailSheet
+                    onOpenDocument(doc.uri, doc.filename, 0)
+                    viewModel.hideDocumentDetail()
+                },
+                onOpenAtPage = { page ->
+                    val doc = selectedDocument ?: return@DocumentDetailSheet
+                    onOpenDocument(doc.uri, doc.filename, page)
+                    viewModel.hideDocumentDetail()
+                },
+                onDismiss = { viewModel.hideDocumentDetail() },
+            )
+        }
+    }
+}
+
+/** The documents list: header with count + sort/bookmark/grid controls, then
+ *  rows or a two-column grid. */
+// @spec LIB-SORT-001
+internal fun LazyListScope.libraryDocumentsItems(
+    visibleDocuments: List<DocumentEntity>,
+    bookmarkCounts: Map<String, Int>,
+    bookmarkedOnly: Boolean,
+    gridMode: Boolean,
+    sortOrder: LibrarySortOrder,
+    onToggleBookmarkedOnly: () -> Unit,
+    onToggleGrid: () -> Unit,
+    onSetSortOrder: (LibrarySortOrder) -> Unit,
+    onTapDocument: (DocumentEntity) -> Unit,
+    onRetryDocument: (DocumentEntity) -> Unit,
+) {
+    item {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (bookmarkedOnly) {
+                    "Bookmarked (${visibleDocuments.size})"
+                } else {
+                    "Documents (${visibleDocuments.size})"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    var showSortMenu by remember { mutableStateOf(false) }
+                    IconButton(onClick = { showSortMenu = true }) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Sort,
+                            contentDescription = "Sort documents",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showSortMenu,
+                        onDismissRequest = { showSortMenu = false },
+                    ) {
+                        sortOptionLabels.forEach { (order, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                leadingIcon = {
+                                    if (order == sortOrder) {
+                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    } else {
+                                        Spacer(Modifier.size(18.dp))
+                                    }
+                                },
+                                onClick = {
+                                    showSortMenu = false
+                                    onSetSortOrder(order)
+                                },
+                            )
+                        }
+                    }
+                }
+                IconButton(onClick = onToggleBookmarkedOnly) {
+                    Icon(
+                        imageVector = if (bookmarkedOnly) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                        contentDescription = if (bookmarkedOnly) {
+                            "Show all documents"
+                        } else {
+                            "Show only bookmarked documents"
+                        },
+                        tint = if (bookmarkedOnly) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                IconButton(onClick = onToggleGrid) {
+                    Icon(
+                        imageVector = if (gridMode) Icons.Default.ViewAgenda else Icons.Default.GridView,
+                        contentDescription = if (gridMode) "Switch to list view" else "Switch to grid view",
+                    )
+                }
+            }
+        }
+    }
+    if (bookmarkedOnly && visibleDocuments.isEmpty()) {
+        item {
+            Text(
+                "No bookmarked documents yet. Open a PDF and tap the bookmark icon in the top bar.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            )
+        }
+    }
+    if (!gridMode) {
+        items(visibleDocuments, key = { it.id }) { doc ->
+            DocumentRow(
+                doc = doc,
+                bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
+                onRetry = if (doc.status == DocumentEntity.STATUS_ERROR) {
+                    { onRetryDocument(doc) }
+                } else null,
+                onTap = { onTapDocument(doc) },
+            )
+        }
+    } else {
+        items(visibleDocuments.chunked(2), key = { it.first().id }) { chunk ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                chunk.forEach { doc ->
+                    DocumentGridCard(
+                        doc = doc,
+                        bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
+                        modifier = Modifier.weight(1f),
+                        onTap = { onTapDocument(doc) },
+                    )
+                }
+                if (chunk.size == 1) {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
         }
     }
 }

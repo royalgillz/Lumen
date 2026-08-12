@@ -7,7 +7,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
@@ -70,6 +72,15 @@ private val DarkColorScheme = darkColorScheme(
     outline = Color(0xFF8B938B),
 )
 
+/**
+ * The resolved dark/light value for the whole app — the Theme setting applied,
+ * with SYSTEM already resolved. Chrome surfaces (viewer status-bar contrast,
+ * canvas colors) read this instead of querying the system theme, so they
+ * follow the user's choice.
+ */
+// @spec SET-APPEAR-003
+val LocalLumenDarkTheme = staticCompositionLocalOf { false }
+
 @Composable
 fun LumenTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -85,9 +96,11 @@ fun LumenTheme(
         }
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
-    )
+    CompositionLocalProvider(LocalLumenDarkTheme provides darkTheme) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = Typography,
+            content = content
+        )
+    }
 }

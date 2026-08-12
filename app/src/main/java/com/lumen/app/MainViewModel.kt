@@ -4,9 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.domain.usecase.IndexLibraryUseCase
-import com.lumen.app.ui.navigation.Screen
+import com.lumen.app.ui.navigation.NavLayoutMode
+import com.lumen.app.ui.navigation.startDestinationFor
+import com.lumen.app.ui.theme.ThemeMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -20,10 +23,24 @@ class MainViewModel @Inject constructor(
     private val indexLibraryUseCase: IndexLibraryUseCase,
 ) : ViewModel() {
 
-    // null = still loading from DataStore; UI waits before composing the nav graph
-    val startDestination: StateFlow<String?> = safRepository.hasCompletedOnboarding
-        .map { done -> if (done) Screen.Search.route else Screen.Onboarding.route }
+    // null = still loading from DataStore; UI waits before composing anything.
+    // Gating on the theme (not just the destination) means a dark-theme user
+    // never sees a light first frame.
+    // @spec SET-APPEAR-005
+    val themeMode: StateFlow<ThemeMode?> = safRepository.themeMode
+        .map<String?, ThemeMode?> { ThemeMode.fromPref(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    // One object so the keyed NavHost never sees a mismatched layout/destination
+    // pair mid-switch (two flows could emit at different instants).
+    // @spec NAV-003
+    data class NavConfig(val startDestination: String, val layout: NavLayoutMode)
+
+    val navConfig: StateFlow<NavConfig?> =
+        combine(safRepository.hasCompletedOnboarding, safRepository.navLayout) { done, layoutPref ->
+            val layout = NavLayoutMode.fromPref(layoutPref)
+            NavConfig(startDestinationFor(done, layout), layout)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     init {
         // Re-enqueue indexing for all saved folders at most once per 6 hours.

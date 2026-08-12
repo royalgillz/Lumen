@@ -45,6 +45,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -69,6 +72,8 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.compose.ui.text.style.TextOverflow
 import com.lumen.app.BuildConfig
 import com.lumen.app.ui.common.folderDisplayName
+import com.lumen.app.ui.navigation.NavLayoutMode
+import com.lumen.app.ui.theme.ThemeMode
 import com.lumen.app.ui.icons.LumenBrandIcon
 import com.lumen.app.ui.icons.PrivacyIcon
 import com.lumen.app.ui.icons.SearchDocIcon
@@ -82,6 +87,8 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     val haptic = LocalHapticFeedback.current
     val folders by viewModel.folders.collectAsState()
     val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
+    val themeMode by viewModel.themeMode.collectAsState()
+    val navLayout by viewModel.navLayout.collectAsState()
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -190,6 +197,15 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         }
         Spacer(Modifier.height(12.dp))
 
+        SectionLabel("Appearance")
+        AppearanceCard(
+            themeMode = themeMode,
+            navLayout = navLayout,
+            onThemeChange = { viewModel.setThemeMode(it) },
+            onNavLayoutChange = { viewModel.setNavLayout(it) },
+        )
+        Spacer(Modifier.height(8.dp))
+
         SectionLabel("Privacy")
         PrivacyDetailsCard()
         Spacer(Modifier.height(16.dp))
@@ -229,6 +245,72 @@ private fun SectionLabel(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
     )
+}
+
+// Theme and navigation-layout choices as single-choice segmented rows: two or
+// three mutually exclusive options are clearest side by side. Persisted and
+// applied immediately — the user watches the bottom bar change under them.
+// @spec SET-APPEAR-001
+@Composable
+private fun AppearanceCard(
+    themeMode: ThemeMode,
+    navLayout: NavLayoutMode,
+    onThemeChange: (ThemeMode) -> Unit,
+    onNavLayoutChange: (NavLayoutMode) -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 1.dp,
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Theme", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Dark theme changes the app, never the pages of your PDFs.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                val options = listOf(
+                    ThemeMode.SYSTEM to "System",
+                    ThemeMode.LIGHT to "Light",
+                    ThemeMode.DARK to "Dark",
+                )
+                options.forEachIndexed { index, (mode, label) ->
+                    SegmentedButton(
+                        selected = themeMode == mode,
+                        onClick = { onThemeChange(mode) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                    ) { Text(label) }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text("Navigation", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "2 tabs merges Search and Library into one Documents screen.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                val options = listOf(
+                    NavLayoutMode.THREE_TAB to "3 tabs",
+                    NavLayoutMode.TWO_TAB to "2 tabs",
+                )
+                options.forEachIndexed { index, (layout, label) ->
+                    SegmentedButton(
+                        selected = navLayout == layout,
+                        onClick = { onNavLayoutChange(layout) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                    ) { Text(label) }
+                }
+            }
+        }
+    }
 }
 
 // The app stating its properties — "details", not "Audit": an audit is

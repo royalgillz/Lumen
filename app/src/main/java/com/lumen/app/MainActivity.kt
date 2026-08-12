@@ -13,8 +13,10 @@ import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.foundation.isSystemInDarkTheme
 import com.lumen.app.ui.navigation.LumenNavGraph
 import com.lumen.app.ui.theme.LumenTheme
+import com.lumen.app.ui.theme.resolveDarkTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
@@ -35,13 +37,20 @@ class MainActivity : ComponentActivity() {
                 androidx.compose.runtime.mutableStateOf(extractPdfUri(intent))
             }
             externalPdfUriState = externalPdfUri
-            LumenTheme {
-                val startDestination by viewModel.startDestination.collectAsState()
-                startDestination?.let { dest ->
-                    LumenNavGraph(
-                        startDestination = dest,
-                        externalPdfUri = externalPdfUri.value,
-                    )
+            // Nothing composes until theme, layout, and destination have loaded
+            // from DataStore — a dark-theme user never sees a light first frame.
+            // @spec SET-APPEAR-005, NAV-003
+            val themeMode by viewModel.themeMode.collectAsState()
+            val navConfig by viewModel.navConfig.collectAsState()
+            themeMode?.let { mode ->
+                LumenTheme(darkTheme = resolveDarkTheme(mode, isSystemInDarkTheme())) {
+                    navConfig?.let { config ->
+                        LumenNavGraph(
+                            startDestination = config.startDestination,
+                            layoutMode = config.layout,
+                            externalPdfUri = externalPdfUri.value,
+                        )
+                    }
                 }
             }
         }

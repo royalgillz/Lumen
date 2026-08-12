@@ -31,6 +31,8 @@ class SafRepository @Inject constructor(
         private val KEY_FILTER_OCR_ONLY = booleanPreferencesKey("filter_ocr_only")
         private val KEY_FILTER_SORT_ORDER = stringPreferencesKey("filter_sort_order")
         private val KEY_LIBRARY_SORT_ORDER = stringPreferencesKey("library_sort_order")
+        private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        private val KEY_NAV_LAYOUT = stringPreferencesKey("nav_layout")
         private val KEY_LAST_AUTO_RESCAN_AT = longPreferencesKey("last_auto_rescan_at")
     }
 
@@ -150,6 +152,23 @@ class SafRepository @Inject constructor(
 
     suspend fun saveLibrarySortOrder(order: String) {
         dataStore.edit { it[KEY_LIBRARY_SORT_ORDER] = order }
+    }
+
+    // ── Appearance ────────────────────────────────────────────────────────────
+    // Raw strings here; parsing (with LIGHT / THREE_TAB defaults) lives in the
+    // enums' fromPref so unknown values can never crash a flow collector.
+    // @spec SET-APPEAR-001
+
+    val themeMode: Flow<String?> = dataStore.data.map { it[KEY_THEME_MODE] }
+
+    suspend fun saveThemeMode(mode: String) {
+        dataStore.edit { it[KEY_THEME_MODE] = mode }
+    }
+
+    val navLayout: Flow<String?> = dataStore.data.map { it[KEY_NAV_LAYOUT] }
+
+    suspend fun saveNavLayout(layout: String) {
+        dataStore.edit { it[KEY_NAV_LAYOUT] = layout }
     }
 
     // ── Auto-rescan timestamp ─────────────────────────────────────────────────

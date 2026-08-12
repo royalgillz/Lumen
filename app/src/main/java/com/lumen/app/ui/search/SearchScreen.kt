@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -116,6 +117,11 @@ fun SearchScreen(
     viewModel: SearchViewModel = hiltViewModel(),
     onResultClick: (uri: String, page: Int, filename: String, keyword: String, occurrence: Int) -> Unit = { _, _, _, _, _ -> },
     onOpenLibrary: () -> Unit = {},
+    // The merged Documents screen appends the library body to the idle home and
+    // suppresses the "Nothing indexed" prompt (its library empty state covers it).
+    // @spec NAV-006
+    showNoIndexPrompt: Boolean = true,
+    extraIdleContent: (LazyListScope.() -> Unit)? = null,
 ) {
     val query by viewModel.query.collectAsState()
     val results by viewModel.results.collectAsState()
@@ -218,6 +224,8 @@ fun SearchScreen(
                     onSelectRecentSearch = { viewModel.query.value = it },
                     onOpenDocument = { doc -> onResultClick(doc.uri, 0, doc.filename, "", 0) },
                     onOpenLibrary = onOpenLibrary,
+                    showNoIndexPrompt = showNoIndexPrompt,
+                    extraContent = extraIdleContent,
                 )
                 searchFailed -> SearchErrorState()
                 // Keep stale results visible while a refinement is in flight; the
@@ -1191,6 +1199,8 @@ private fun SearchEmptyState(
     onSelectRecentSearch: (String) -> Unit,
     onOpenDocument: (DocumentEntity) -> Unit,
     onOpenLibrary: () -> Unit,
+    showNoIndexPrompt: Boolean = true,
+    extraContent: (LazyListScope.() -> Unit)? = null,
 ) {
     // Count not loaded yet — render nothing rather than flashing the
     // "Nothing indexed" prompt at a user whose library is full.
@@ -1199,7 +1209,7 @@ private fun SearchEmptyState(
         return
     }
     // Nothing indexed yet — keep the original onboarding-style prompt.
-    if (indexedCount == 0) {
+    if (indexedCount == 0 && showNoIndexPrompt) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1290,6 +1300,10 @@ private fun SearchEmptyState(
             }
         }
 
+        // Merged Documents screen: the library body continues the idle surface.
+        // @spec NAV-006
+        extraContent?.invoke(this)
+
         item {
             Text(
                 text = "Tip: Use multiple words for AND matching — \"climate policy 2024\" finds lines containing all three terms.",
@@ -1331,7 +1345,8 @@ private fun RecentDocumentRow(doc: DocumentEntity, onClick: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = "${doc.pageCount} ${if (doc.pageCount == 1) "page" else "pages"}",
+                // @spec LIB-PLU-001
+                text = quantity(doc.pageCount, "page"),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

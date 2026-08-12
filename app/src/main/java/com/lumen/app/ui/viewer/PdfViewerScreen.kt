@@ -23,7 +23,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
@@ -117,6 +116,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.BookmarkEntity
+import com.lumen.app.ui.theme.LocalLumenDarkTheme
 import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -138,7 +138,12 @@ fun PdfViewerScreen(
     val context = LocalContext.current
     val view = LocalView.current
     val activity = context as? Activity
-    val isDarkTheme = isSystemInDarkTheme()
+    // The resolved Theme setting, not the system theme: the viewer's status-bar
+    // contrast and canvas colors must follow the user's choice. Only the chrome
+    // and the canvas AROUND pages are themed — page content renders exactly as
+    // the document specifies, never inverted.
+    // @spec SET-APPEAR-003, SET-APPEAR-004
+    val isDarkTheme = LocalLumenDarkTheme.current
     val parsedUriIsValid = remember(uri) { runCatching { Uri.parse(uri) }.getOrNull() != null }
 
     val documentState by viewModel.documentState.collectAsState()
