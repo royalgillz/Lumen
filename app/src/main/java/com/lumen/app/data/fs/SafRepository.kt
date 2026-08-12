@@ -30,6 +30,7 @@ class SafRepository @Inject constructor(
         private val KEY_VIEWER_SCROLL_HORIZONTAL = booleanPreferencesKey("viewer_scroll_horizontal")
         private val KEY_FILTER_OCR_ONLY = booleanPreferencesKey("filter_ocr_only")
         private val KEY_FILTER_SORT_ORDER = stringPreferencesKey("filter_sort_order")
+        private val KEY_LIBRARY_SORT_ORDER = stringPreferencesKey("library_sort_order")
         private val KEY_LAST_AUTO_RESCAN_AT = longPreferencesKey("last_auto_rescan_at")
     }
 
@@ -138,6 +139,17 @@ class SafRepository @Inject constructor(
 
     suspend fun saveFilterSortOrder(sortOrder: String) {
         dataStore.edit { it[KEY_FILTER_SORT_ORDER] = sortOrder }
+    }
+
+    // ── Library sort persistence ──────────────────────────────────────────────
+    // @spec LIB-SORT-002
+
+    val librarySortOrder: Flow<String> = dataStore.data.map { prefs ->
+        prefs[KEY_LIBRARY_SORT_ORDER] ?: "RECENTLY_ADDED"
+    }
+
+    suspend fun saveLibrarySortOrder(order: String) {
+        dataStore.edit { it[KEY_LIBRARY_SORT_ORDER] = order }
     }
 
     // ── Auto-rescan timestamp ─────────────────────────────────────────────────

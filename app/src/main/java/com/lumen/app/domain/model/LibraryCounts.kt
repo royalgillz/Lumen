@@ -33,3 +33,18 @@ data class LibraryCounts(
         return parts.joinToString(" · ")
     }
 }
+
+/**
+ * The index-health card's warning line: names the cause when every failed
+ * document shares one ("1 file needs a password"), goes generic when causes
+ * mix ("3 files need attention"), and is absent when nothing failed.
+ */
+// @spec LIB-HLTH-002
+fun indexWarningLine(encryptedCount: Int, errorCount: Int): String? = when {
+    encryptedCount == 0 && errorCount == 0 -> null
+    errorCount == 0 ->
+        "${quantity(encryptedCount, "file")} ${if (encryptedCount == 1) "needs" else "need"} a password"
+    encryptedCount == 0 -> "${quantity(errorCount, "file")} failed to index"
+    // Mixed causes imply at least two files, so the verb is always plural.
+    else -> "${quantity(encryptedCount + errorCount, "file")} need attention"
+}

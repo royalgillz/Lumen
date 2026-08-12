@@ -22,27 +22,6 @@ interface PageDao {
     @Query("DELETE FROM pages WHERE docId = :docId")
     suspend fun deleteByDocument(docId: Long)
 
-    @Query("""
-        SELECT COUNT(*) FROM pages p
-        JOIN documents d ON p.docId = d.id
-        WHERE d.status = 'indexed'
-    """)
-    fun observeTotalPages(): Flow<Int>
-
-    @Query("""
-        SELECT COALESCE(SUM(p.wordCount), 0) FROM pages p
-        JOIN documents d ON p.docId = d.id
-        WHERE d.status = 'indexed'
-    """)
-    fun observeTotalWords(): Flow<Int>
-
-    @Query("""
-        SELECT COUNT(*) FROM pages p
-        JOIN documents d ON p.docId = d.id
-        WHERE d.status = 'indexed' AND p.isOcr = 1
-    """)
-    fun observeOcrPages(): Flow<Int>
-
     @Query("SELECT COUNT(*) FROM pages WHERE docId = :docId AND isOcr = 1")
     suspend fun getOcrPageCount(docId: Long): Int
 

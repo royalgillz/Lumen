@@ -45,9 +45,28 @@ interface DocumentDao {
     @Query("SELECT COUNT(*) FROM documents WHERE status = 'indexed'")
     fun observeIndexedCount(): Flow<Int>
 
-    // Most recently indexed documents, for the Search home screen.
-    @Query("SELECT * FROM documents WHERE status = 'indexed' ORDER BY indexedAt DESC LIMIT :limit")
-    fun observeRecentlyIndexed(limit: Int = 8): Flow<List<DocumentEntity>>
+    // Most recently OPENED documents, for the Search home screen. Status-blind:
+    // user recency reflects what the user did, not what indexed — an encrypted
+    // document the user opened appears (tapping re-prompts for its password).
+    @Query("SELECT * FROM documents WHERE lastOpenedAt IS NOT NULL ORDER BY lastOpenedAt DESC LIMIT :limit")
+    fun observeRecentlyOpened(limit: Int = 8): Flow<List<DocumentEntity>>
+
+    // Update-by-URI that silently no-ops for unknown URIs (external VIEW-intent opens).
+    @Query("UPDATE documents SET lastOpenedAt = :openedAt WHERE uri = :uri")
+    suspend fun markOpened(uri: String, openedAt: Long)
+
+    // Per-folder index-health numbers for the Library card: file, page, and
+    // OCR-page counts grouped by tree URI. LEFT JOIN so zero-page documents count.
+    @Query("""
+        SELECT d.treeUri AS treeUri,
+               COUNT(DISTINCT d.id) AS files,
+               COUNT(p.id) AS pages,
+               COALESCE(SUM(CASE WHEN p.isOcr = 1 THEN 1 ELSE 0 END), 0) AS ocrPages
+        FROM documents d
+        LEFT JOIN pages p ON p.docId = d.id
+        GROUP BY d.treeUri
+    """)
+    fun observeFolderStats(): Flow<List<FolderStatsRow>>
 
     @Query("SELECT * FROM documents WHERE status = 'pending' OR status = 'error'")
     suspend fun getPendingOrError(): List<DocumentEntity>
@@ -77,3 +96,10 @@ data class FilenameSearchRow(
 )
 
 data class DocIdUri(val id: Long, val uri: String)
+
+data class FolderStatsRow(
+    val treeUri: String,
+    val files: Int,
+    val pages: Int,
+    val ocrPages: Int,
+)

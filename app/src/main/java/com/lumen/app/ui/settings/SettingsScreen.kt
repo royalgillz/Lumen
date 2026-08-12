@@ -1,6 +1,13 @@
 package com.lumen.app.ui.settings
 
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -26,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -53,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -182,7 +191,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         Spacer(Modifier.height(12.dp))
 
         SectionLabel("Privacy")
-        PrivacyAuditCard()
+        PrivacyDetailsCard()
         Spacer(Modifier.height(16.dp))
 
         SectionLabel("Data")
@@ -222,8 +231,13 @@ private fun SectionLabel(text: String) {
     )
 }
 
+// The app stating its properties — "details", not "Audit": an audit is
+// something a third party performs, and overclaiming the word costs
+// credibility with exactly the audience this card serves. Four claims, each
+// stated once; capability facts (OCR languages) and licensing live in About.
+// @spec SET-PRIV-001, SET-PRIV-002
 @Composable
-private fun PrivacyAuditCard() {
+private fun PrivacyDetailsCard() {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -233,18 +247,15 @@ private fun PrivacyAuditCard() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                "Privacy Audit",
+                "Privacy details",
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.height(12.dp))
-            PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "No internet permission", "This app cannot make network requests, ever.", isGood = true)
-            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "No analytics or crash reporting", "No Firebase, Sentry, or any SDK that phones home.", isGood = true)
-            PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "Files read in-place", "PDFs are never copied into app storage.", isGood = true)
-            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "Index stored on-device only", "Full-text index lives in a local SQLite database.", isGood = true)
-            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "OCR languages", "OCR recognises Latin-script text fully on-device. Other scripts aren't supported yet.", isGood = true)
-            PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "Backups", "Your search index never leaves this device and is excluded from system backups. After moving to a new phone, re-add your folders to rebuild it.", isGood = true)
-            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "AGPL source availability", "Source code available at github.com/royalgillz/Lumen", isGood = true)
+            PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "No internet permission", "The app declares no network permission in its manifest, so it cannot make requests even if it tried.", isGood = true)
+            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "No analytics or crash reporting", "No Firebase, no Sentry, no SDK that phones home.", isGood = true)
+            PrivacyRow(icon = { tint -> PrivacyIcon(tint) }, "Files read in place", "PDFs are never copied into app storage. Lumen reads them where they already live.", isGood = true)
+            PrivacyRow(icon = { tint -> SearchDocIcon(tint) }, "Index stored on device only", "The full-text index is a local SQLite database, excluded from system backups. On a new phone, re-add your folders to rebuild it.", isGood = true)
         }
     }
 }
@@ -448,8 +459,21 @@ private fun IndexedFoldersCard(
     }
 }
 
+// The app's factual footer: version, capability, and licensing. The source URL
+// is a real affordance — tappable (the browser makes the request; Lumen still
+// holds no network permission) with a copy fallback for readers who want to
+// inspect before opening. This row carries the MuPDF AGPL attribution.
+// @spec SET-ABOUT-001, SET-ABOUT-002, SET-ABOUT-003
 @Composable
 private fun AboutCard() {
+    val context = LocalContext.current
+    val repoUrl = "https://github.com/royalgillz/Lumen"
+
+    fun copyUrl() {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Lumen source", repoUrl))
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -465,6 +489,60 @@ private fun AboutCard() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            Spacer(Modifier.height(12.dp))
+            Text("OCR languages", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "OCR recognises Latin-script text fully on-device. Other scripts aren't supported yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Text("Source & licenses", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Lumen is open source (AGPL-3.0). PDF rendering by MuPDF (AGPL).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "github.com/royalgillz/Lumen",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            try {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(repoUrl)))
+                            } catch (_: ActivityNotFoundException) {
+                                copyUrl()
+                                // Always shown: it explains WHY nothing opened,
+                                // which the 13+ clipboard overlay doesn't convey.
+                                Toast.makeText(context, "No browser found — URL copied", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        .padding(vertical = 8.dp),
+                )
+                IconButton(onClick = {
+                    copyUrl()
+                    // Android 13+ shows its own clipboard overlay; a toast there duplicates it.
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                        Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
+                    }
+                }) {
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        contentDescription = "Copy source URL",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
         }
     }
 }

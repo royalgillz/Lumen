@@ -15,7 +15,10 @@ data class DocumentEntity(
     val lastModified: Long = 0L,
     val addedAt: Long = System.currentTimeMillis(),
     val indexedAt: Long? = null,
-    val sizeBytes: Long = 0L
+    val sizeBytes: Long = 0L,
+    /** When the viewer last opened this document — user recency, distinct from
+     *  indexedAt (system recency). Null until first opened. */
+    val lastOpenedAt: Long? = null,
 ) {
     companion object {
         const val STATUS_PENDING = "pending"

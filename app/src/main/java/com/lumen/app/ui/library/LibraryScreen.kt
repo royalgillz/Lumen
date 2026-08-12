@@ -29,16 +29,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -54,6 +62,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -74,9 +83,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.data.db.dao.FolderStatsRow
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.domain.model.LibraryCounts
+import com.lumen.app.domain.model.indexWarningLine
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
 import com.lumen.app.ui.common.quantity
@@ -98,9 +109,8 @@ fun LibraryScreen(
     val folders = foldersOrNull.orEmpty()
     val isIndexing by viewModel.isIndexing.collectAsState()
     val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
-    val totalPages by viewModel.totalPages.collectAsState()
-    val totalWords by viewModel.totalWords.collectAsState()
-    val ocrPages by viewModel.ocrPages.collectAsState()
+    val folderStats by viewModel.folderStats.collectAsState()
+    val sortOrder by viewModel.sortOrder.collectAsState()
     val selectedDocument by viewModel.selectedDocument.collectAsState()
     val selectedDocOcrPages by viewModel.selectedDocOcrPages.collectAsState()
     val selectedDocBookmarks by viewModel.selectedDocBookmarks.collectAsState()
@@ -211,33 +221,25 @@ fun LibraryScreen(
             } else if (folders.isEmpty() && documents.isEmpty()) {
                 LibraryEmptyState(onAdd = { folderPickerLauncher.launch(null) })
             } else {
-                LibraryStats(
+                IndexHealthCard(
                     documents = documents,
-                    folderCount = folders.size,
-                    totalPages = totalPages,
-                    totalWords = totalWords,
-                    ocrPages = ocrPages,
+                    folderStats = folderStats,
+                    onReindexFolder = { viewModel.reindexFolder(it) },
+                    onOpenDocument = { doc -> onOpenDocument(doc.uri, doc.filename, 0) },
+                    onRetryDocument = { viewModel.retryDocument(it) },
                 )
 
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     if (documents.isNotEmpty()) {
-                        val failedOrEncrypted = documents.filter {
-                            it.status == DocumentEntity.STATUS_ERROR || it.status == DocumentEntity.STATUS_ENCRYPTED
-                        }
-                        if (failedOrEncrypted.isNotEmpty()) {
-                            item {
-                                ErrorCenterCard(
-                                    documents = failedOrEncrypted,
-                                    onRetry = { doc -> viewModel.retryDocument(doc) },
-                                    onOpen = { doc -> onOpenDocument(doc.uri, doc.filename, 0) },
-                                )
-                            }
-                        }
-                        val visibleDocuments = if (bookmarkedOnly) {
-                            documents.filter { (bookmarkCounts[it.uri] ?: 0) > 0 }
-                        } else {
-                            documents
-                        }
+                        // @spec LIB-SORT-001
+                        val visibleDocuments = sortLibrary(
+                            if (bookmarkedOnly) {
+                                documents.filter { (bookmarkCounts[it.uri] ?: 0) > 0 }
+                            } else {
+                                documents
+                            },
+                            sortOrder,
+                        )
                         item {
                             Row(
                                 modifier = Modifier
@@ -256,6 +258,37 @@ fun LibraryScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box {
+                                        var showSortMenu by remember { mutableStateOf(false) }
+                                        IconButton(onClick = { showSortMenu = true }) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.Sort,
+                                                contentDescription = "Sort documents",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        DropdownMenu(
+                                            expanded = showSortMenu,
+                                            onDismissRequest = { showSortMenu = false },
+                                        ) {
+                                            sortOptionLabels.forEach { (order, label) ->
+                                                DropdownMenuItem(
+                                                    text = { Text(label) },
+                                                    leadingIcon = {
+                                                        if (order == sortOrder) {
+                                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                        } else {
+                                                            Spacer(Modifier.size(18.dp))
+                                                        }
+                                                    },
+                                                    onClick = {
+                                                        showSortMenu = false
+                                                        viewModel.setSortOrder(order)
+                                                    },
+                                                )
+                                            }
+                                        }
+                                    }
                                     IconButton(onClick = { bookmarkedOnly = !bookmarkedOnly }) {
                                         Icon(
                                             imageVector = if (bookmarkedOnly) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
@@ -372,18 +405,19 @@ private fun IndexingBottomBar() {
     }
 }
 
+// Collapsed one-line summary that expands into the index-health detail. The
+// first screenful of the Library shows documents, not statistics; problem
+// files are actionable here, beside the counts that reference them (this card
+// replaces the former Error Center and Words tile).
+// @spec LIB-CNT-001, LIB-CNT-002, LIB-CNT-006, LIB-HLTH-001, LIB-HLTH-005
 @Composable
-private fun LibraryStats(
+private fun IndexHealthCard(
     documents: List<DocumentEntity>,
-    folderCount: Int,
-    totalPages: Int,
-    totalWords: Int,
-    ocrPages: Int,
+    folderStats: List<FolderStatsRow>,
+    onReindexFolder: (String) -> Unit,
+    onOpenDocument: (DocumentEntity) -> Unit,
+    onRetryDocument: (DocumentEntity) -> Unit,
 ) {
-    // One status-bucketed derivation feeds every number on this card; the
-    // buckets read as a single sentence so 313-vs-312 explains itself instead
-    // of eroding trust. Failed documents are named, never silently missing.
-    // @spec LIB-CNT-001, LIB-CNT-002, LIB-CNT-006
     val counts = LibraryCounts(
         total = documents.size,
         indexed = documents.count { it.status == DocumentEntity.STATUS_INDEXED },
@@ -394,8 +428,14 @@ private fun LibraryStats(
             it.status == DocumentEntity.STATUS_PENDING || it.status == DocumentEntity.STATUS_INDEXING
         },
     )
+    // @spec LIB-CNT-004 — the empty-library state replaces the card entirely.
+    val sentence = counts.summarySentence() ?: return
+    val encrypted = documents.filter { it.status == DocumentEntity.STATUS_ENCRYPTED }
+    val errored = documents.filter { it.status == DocumentEntity.STATUS_ERROR }
+    var expanded by rememberSaveable { mutableStateOf(false) }
 
     Surface(
+        onClick = { expanded = !expanded },
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -403,146 +443,125 @@ private fun LibraryStats(
         tonalElevation = 1.dp,
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-            counts.summarySentence()?.let { sentence ->
-                Text(
-                    text = sentence,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = quantity(folderCount, "folder"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            if (totalPages > 0) {
-                Spacer(Modifier.height(8.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                ) {
-                    MiniStat(value = formatCount(totalPages), label = "Pages")
-                    MiniStat(value = formatCount(totalWords), label = "Words")
-                    MiniStat(
-                        value = if (totalPages > 0) "${(ocrPages * 100 / totalPages)}%" else "0%",
-                        label = "OCR",
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = sentence,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MiniStat(value: String, label: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = value,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(text = label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun ErrorCenterCard(
-    documents: List<DocumentEntity>,
-    onRetry: (DocumentEntity) -> Unit,
-    onOpen: (DocumentEntity) -> Unit,
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(12.dp),
-        tonalElevation = 1.dp,
-    ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                text = "Error Center (${documents.size})",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.error,
-            )
-            documents.take(4).forEach { doc ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = doc.filename,
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = if (doc.status == DocumentEntity.STATUS_ENCRYPTED) "Encrypted" else "Indexing failed",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Surface(
-                        onClick = { onOpen(doc) },
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                    ) {
-                        Text(
-                            text = "Open",
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                    }
-                    if (doc.status == DocumentEntity.STATUS_ERROR) {
-                        Surface(
-                            onClick = { onRetry(doc) },
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.errorContainer,
-                        ) {
+                    // @spec LIB-HLTH-002
+                    indexWarningLine(encrypted.size, errored.size)?.let { warning ->
+                        Spacer(Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = Terracotta,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
                             Text(
-                                text = "Retry",
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                text = warning,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Terracotta,
                             )
                         }
-                    } else {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                        ) {
+                    }
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (expanded) "Collapse index details" else "Expand index details",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (expanded) {
+                // @spec LIB-HLTH-003
+                folderStats.forEach { stat ->
+                    Spacer(Modifier.height(10.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Encrypted",
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                style = MaterialTheme.typography.labelMedium,
+                                text = stat.treeUri.takeIf { it.isNotBlank() }
+                                    ?.let { folderDisplayName(Uri.parse(it)) } ?: "Documents",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = "${quantity(stat.files, "file")} · ${quantity(stat.pages, "page")} · " +
+                                    "${stat.ocrPages} read via OCR",
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        TextButton(onClick = { onReindexFolder(stat.treeUri) }) {
+                            Text("Re-index", fontWeight = FontWeight.SemiBold)
+                        }
                     }
                 }
-            }
-            if (documents.size > 4) {
-                Text(
-                    text = "+${documents.size - 4} more",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+
+                // @spec LIB-HLTH-004
+                (encrypted + errored).forEach { doc ->
+                    Spacer(Modifier.height(10.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (doc.status == DocumentEntity.STATUS_ENCRYPTED) Icons.Default.Lock else Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = Terracotta,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = doc.filename,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = if (doc.status == DocumentEntity.STATUS_ENCRYPTED) {
+                                    "Password-protected — can't be indexed yet"
+                                } else {
+                                    "Indexing failed"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (doc.status == DocumentEntity.STATUS_ENCRYPTED) {
+                            TextButton(onClick = { onOpenDocument(doc) }) {
+                                Text("Enter password", color = Terracotta, fontWeight = FontWeight.SemiBold)
+                            }
+                        } else {
+                            TextButton(onClick = { onRetryDocument(doc) }) {
+                                Text("Retry", color = Terracotta, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
             }
         }
     }

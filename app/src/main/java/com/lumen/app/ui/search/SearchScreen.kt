@@ -1240,6 +1240,7 @@ private fun SearchEmptyState(
         if (recentSearches.isNotEmpty()) {
             item {
                 Text(
+                    // @spec SEARCH-UI-003
                     "Recent searches",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1277,7 +1278,8 @@ private fun SearchEmptyState(
         if (recentDocuments.isNotEmpty()) {
             item {
                 Text(
-                    "Recently indexed",
+                    // @spec SEARCH-UI-004, SEARCH-UI-005
+                    "Recently opened",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),

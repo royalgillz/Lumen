@@ -23,7 +23,7 @@ import com.lumen.app.data.text.TextNormalizer
         PageTextFtsEntity::class,
         BookmarkEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 abstract class LumenDatabase : RoomDatabase() {
@@ -107,6 +107,15 @@ abstract class LumenDatabase : RoomDatabase() {
                         "USING FTS4(`textNorm` TEXT NOT NULL, tokenize=unicode61, content=`page_text`)"
                 )
                 database.execSQL("INSERT INTO page_text_fts(page_text_fts) VALUES('rebuild')")
+            }
+        }
+
+        // User recency: when the viewer last opened each document. Nullable and
+        // additive — never-opened documents simply have no recency.
+        // @spec LIB-REC-002
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE documents ADD COLUMN lastOpenedAt INTEGER")
             }
         }
 

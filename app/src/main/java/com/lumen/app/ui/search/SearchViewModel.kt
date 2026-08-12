@@ -69,8 +69,10 @@ class SearchViewModel @Inject constructor(
     val searchHistory: StateFlow<List<String>> = safRepository.searchHistory
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    // Recently indexed documents, surfaced on the Search home screen.
-    val recentDocuments: StateFlow<List<DocumentEntity>> = documentDao.observeRecentlyIndexed(8)
+    // Recently OPENED documents, surfaced on the Search home screen — user
+    // recency, not indexer recency; status-blind by design.
+    // @spec SEARCH-UI-004
+    val recentDocuments: StateFlow<List<DocumentEntity>> = documentDao.observeRecentlyOpened(8)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val availableFolders: StateFlow<Set<Uri>> = safRepository.folderUris

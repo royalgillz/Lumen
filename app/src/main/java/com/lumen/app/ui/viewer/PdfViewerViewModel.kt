@@ -132,6 +132,15 @@ class PdfViewerViewModel @Inject constructor(
                 is MuPdfPageRenderer.OpenResult.Ok -> {
                     currentRenderer = res.renderer
                     _documentState.value = DocumentState.Loaded(res.renderer)
+                    // User recency: once per genuine open (the same-document guard
+                    // upstream suppresses rotation re-opens); silently no-ops for
+                    // documents with no library row (external VIEW-intent opens).
+                    // @spec LIB-REC-001
+                    appScope.launch {
+                        runCatching {
+                            documentDao.markOpened(parsedUri.toString(), System.currentTimeMillis())
+                        }
+                    }
                 }
                 MuPdfPageRenderer.OpenResult.NeedsPassword -> {
                     _documentState.value =

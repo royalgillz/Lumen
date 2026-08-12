@@ -7,9 +7,12 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.lumen.app.data.db.dao.BookmarkDao
+import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.dao.FolderStatsRow
 import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.repository.LibraryRepository
 import com.lumen.app.di.ApplicationScope
 import com.lumen.app.domain.usecase.AddFolderUseCase
@@ -22,6 +25,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
@@ -36,7 +40,9 @@ class LibraryViewModel @Inject constructor(
     private val addFolderUseCase: AddFolderUseCase,
     private val workManager: WorkManager,
     private val pageDao: PageDao,
+    private val documentDao: DocumentDao,
     private val bookmarkDao: BookmarkDao,
+    private val safRepository: SafRepository,
     @ApplicationScope private val appScope: CoroutineScope,
 ) : ViewModel() {
 
@@ -62,15 +68,27 @@ class LibraryViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
-    // Library stats
-    val totalPages: StateFlow<Int> = pageDao.observeTotalPages()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    // Per-folder index-health numbers (files · pages · OCR pages) for the card.
+    val folderStats: StateFlow<List<FolderStatsRow>> = documentDao.observeFolderStats()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val totalWords: StateFlow<Int> = pageDao.observeTotalWords()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    // Library list ordering; persisted choice restored at startup.
+    // @spec LIB-SORT-002
+    val sortOrder = MutableStateFlow(LibrarySortOrder.RECENTLY_ADDED)
 
-    val ocrPages: StateFlow<Int> = pageDao.observeOcrPages()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    fun setSortOrder(order: LibrarySortOrder) {
+        sortOrder.value = order
+        viewModelScope.launch { safRepository.saveLibrarySortOrder(order.name) }
+    }
+
+    fun reindexFolder(treeUri: String) {
+        val parsed = treeUri.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } ?: return
+        workManager.enqueueUniqueWork(
+            "index_$parsed",
+            ExistingWorkPolicy.KEEP,
+            IndexWorker.buildRequest(parsed),
+        )
+    }
 
     // Document detail sheet
     val selectedDocument = MutableStateFlow<DocumentEntity?>(null)
@@ -91,6 +109,11 @@ class LibraryViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {
+        viewModelScope.launch {
+            val saved = safRepository.librarySortOrder.first()
+            sortOrder.value = runCatching { LibrarySortOrder.valueOf(saved) }
+                .getOrDefault(LibrarySortOrder.RECENTLY_ADDED)
+        }
         viewModelScope.launch {
             selectedDocument.collectLatest { doc ->
                 _selectedDocOcrPages.value = if (doc != null) pageDao.getOcrPageCount(doc.id) else 0
