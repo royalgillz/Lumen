@@ -100,6 +100,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.FtsQuerySanitizer
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.domain.model.DocumentTitles
 import com.lumen.app.domain.model.IndexedWithin
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
@@ -124,6 +125,7 @@ fun SearchScreen(
     extraIdleContent: (LazyListScope.() -> Unit)? = null,
 ) {
     val query by viewModel.query.collectAsState()
+    val customTitles by viewModel.customTitles.collectAsState()
     val results by viewModel.results.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
     val isTruncated by viewModel.isTruncated.collectAsState()
@@ -224,6 +226,7 @@ fun SearchScreen(
                     onSelectRecentSearch = { viewModel.query.value = it },
                     onOpenDocument = { doc -> onResultClick(doc.uri, 0, doc.filename, "", 0) },
                     onOpenLibrary = onOpenLibrary,
+                    customTitles = customTitles,
                     showNoIndexPrompt = showNoIndexPrompt,
                     extraContent = extraIdleContent,
                 )
@@ -652,13 +655,24 @@ private fun DocumentGroupHeader(
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = first.filename,
+                    // @spec SEARCH-UI-006
+                    text = first.displayTitle,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onBackground,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (first.displayTitle != first.filename) {
+                    Text(
+                        // @spec LIB-TTL-003
+                        text = first.filename,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1,
+                        overflow = TextOverflow.MiddleEllipsis,
+                    )
+                }
                 if (first.folderName.isNotEmpty()) {
                     Spacer(Modifier.height(3.dp))
                     Text(
@@ -884,7 +898,8 @@ fun ResultRow(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = result.filename,
+                            // @spec SEARCH-UI-006
+                            text = result.displayTitle,
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onBackground,
@@ -999,7 +1014,8 @@ private fun SnippetContextMenu(
             leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
             onClick = {
                 onDismiss()
-                val text = "${result.filename} · p.${result.pageNumber + 1}\n\n${result.snippet}"
+                // @spec SEARCH-UI-006
+                val text = "${result.displayTitle} · p.${result.pageNumber + 1}\n\n${result.snippet}"
                 context.startActivity(
                     Intent.createChooser(
                         Intent(Intent.ACTION_SEND).apply {
@@ -1199,6 +1215,7 @@ private fun SearchEmptyState(
     onSelectRecentSearch: (String) -> Unit,
     onOpenDocument: (DocumentEntity) -> Unit,
     onOpenLibrary: () -> Unit,
+    customTitles: Map<String, String> = emptyMap(),
     showNoIndexPrompt: Boolean = true,
     extraContent: (LazyListScope.() -> Unit)? = null,
 ) {
@@ -1296,7 +1313,11 @@ private fun SearchEmptyState(
                 )
             }
             items(recentDocuments, key = { it.id }) { doc ->
-                RecentDocumentRow(doc = doc, onClick = { onOpenDocument(doc) })
+                RecentDocumentRow(
+                    doc = doc,
+                    displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
+                    onClick = { onOpenDocument(doc) },
+                )
             }
         }
 
@@ -1316,7 +1337,7 @@ private fun SearchEmptyState(
 }
 
 @Composable
-private fun RecentDocumentRow(doc: DocumentEntity, onClick: () -> Unit) {
+private fun RecentDocumentRow(doc: DocumentEntity, displayTitle: String, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1339,11 +1360,21 @@ private fun RecentDocumentRow(doc: DocumentEntity, onClick: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = doc.filename,
+                // @spec SEARCH-UI-006
+                text = displayTitle,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (displayTitle != doc.filename) {
+                Text(
+                    text = doc.filename,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1,
+                    overflow = TextOverflow.MiddleEllipsis,
+                )
+            }
             Text(
                 // @spec LIB-PLU-001
                 text = quantity(doc.pageCount, "page"),

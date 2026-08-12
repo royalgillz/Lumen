@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.dao.DocumentTitleDao
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.repository.SearchRepository
@@ -36,6 +37,7 @@ import javax.inject.Inject
 class SearchViewModel @Inject constructor(
     private val searchUseCase: SearchUseCase,
     private val documentDao: DocumentDao,
+    documentTitleDao: DocumentTitleDao,
     private val workManager: WorkManager,
     private val safRepository: SafRepository,
 ) : ViewModel() {
@@ -74,6 +76,11 @@ class SearchViewModel @Inject constructor(
     // @spec SEARCH-UI-004
     val recentDocuments: StateFlow<List<DocumentEntity>> = documentDao.observeRecentlyOpened(8)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** docUri → user rename, for display titles on the recently-opened rows. */
+    val customTitles: StateFlow<Map<String, String>> = documentTitleDao.observeAll()
+        .map { rows -> rows.associate { it.docUri to it.title } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val availableFolders: StateFlow<Set<Uri>> = safRepository.folderUris
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())

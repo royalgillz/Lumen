@@ -21,6 +21,8 @@ import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.db.entity.PageEntity
 import com.lumen.app.data.db.entity.PageTextEntity
+import com.lumen.app.data.db.entity.mergeForReindex
+import com.lumen.app.domain.model.DocumentTitles
 import androidx.room.withTransaction
 import com.lumen.app.data.db.LumenDatabase
 import com.lumen.app.data.fs.PdfFile
@@ -117,16 +119,20 @@ class IndexWorker @AssistedInject constructor(
             return
         }
 
+        // REPLACE would wipe any column not threaded through; the merge preserves
+        // identity and user recency while this pass owns the extraction columns.
+        // @spec LIB-TTL-009
         val docId = documentDao.upsert(
-            DocumentEntity(
-                id = existing?.id ?: 0,
-                uri = uriStr,
-                filename = pdf.filename,
-                treeUri = folderUri.toString(),
-                status = DocumentEntity.STATUS_INDEXING,
-                lastModified = pdf.lastModified,
-                sizeBytes = pdf.sizeBytes,
-                addedAt = existing?.addedAt ?: System.currentTimeMillis(),
+            mergeForReindex(
+                existing,
+                DocumentEntity(
+                    uri = uriStr,
+                    filename = pdf.filename,
+                    treeUri = folderUri.toString(),
+                    status = DocumentEntity.STATUS_INDEXING,
+                    lastModified = pdf.lastModified,
+                    sizeBytes = pdf.sizeBytes,
+                ),
             )
         )
         pageDao.deleteByDocument(docId)
@@ -134,7 +140,11 @@ class IndexWorker @AssistedInject constructor(
         // Pass 1: extract text from every page via PdfBox
         data class PageData(val index: Int, val text: String, val needsOcr: Boolean)
         val pages = mutableListOf<PageData>()
-        val outcome = pdfTextExtractor.extractAll(pdf.uri) { pageIndex, rawText ->
+        var metadataTitle: String? = null
+        val outcome = pdfTextExtractor.extractAll(
+            pdf.uri,
+            onMetadataTitle = { metadataTitle = it },
+        ) { pageIndex, rawText ->
             val needsOcr = rawText.trim().length < MIN_CHARS_TEXT_PDF
             pages.add(PageData(pageIndex, rawText, needsOcr))
         }
@@ -192,6 +202,17 @@ class IndexWorker @AssistedInject constructor(
                 }
             }
         }
+
+        // Indexing always recomputes the derived title from the current file;
+        // the backfill only fills never-attempted rows.
+        // @spec LIB-TTL-008
+        val pageZeroText = pages.firstOrNull { it.index == 0 }?.let { p ->
+            if (p.needsOcr) ocrTexts[p.index] ?: p.text else p.text
+        }
+        documentDao.updateDerivedTitle(
+            docId,
+            DocumentTitles.deriveTitle(metadataTitle, pageZeroText, pdf.filename),
+        )
 
         when (outcome) {
             PdfTextExtractor.Outcome.OK ->

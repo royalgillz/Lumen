@@ -22,6 +22,7 @@ class PdfTextExtractor @Inject constructor(
      */
     suspend fun extractAll(
         uri: Uri,
+        onMetadataTitle: (String?) -> Unit = {},
         onPage: suspend (pageIndex: Int, text: String) -> Unit,
     ): Outcome {
         val inputStream = context.contentResolver.openInputStream(uri)
@@ -29,6 +30,7 @@ class PdfTextExtractor @Inject constructor(
         return try {
             inputStream.use { stream ->
                 PDDocument.load(stream).use { doc ->
+                    onMetadataTitle(runCatching { doc.documentInformation?.title }.getOrNull())
                     val stripper = PDFTextStripper()
                     repeat(doc.numberOfPages) { i ->
                         stripper.startPage = i + 1

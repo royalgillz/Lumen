@@ -5,6 +5,9 @@ data class SearchResult(
     val docId: Long,
     val uri: String,
     val filename: String,
+    // What the document is called on screen (customTitle > derivedTitle >
+    // filename); filename stays for file operations and the caption.
+    val displayTitle: String,
     // 0-indexed internally; display as pageNumber + 1
     val pageNumber: Int,
     val lineNumber: Int,

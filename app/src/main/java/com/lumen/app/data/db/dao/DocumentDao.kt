@@ -68,6 +68,13 @@ interface DocumentDao {
     """)
     fun observeFolderStats(): Flow<List<FolderStatsRow>>
 
+    @Query("UPDATE documents SET derivedTitle = :title WHERE id = :id")
+    suspend fun updateDerivedTitle(id: Long, title: String)
+
+    // Never-attempted rows only — the one-time title backfill's work list.
+    @Query("SELECT id, filename FROM documents WHERE derivedTitle IS NULL")
+    suspend fun docsNeedingTitles(): List<DocTitleCandidate>
+
     @Query("SELECT * FROM documents WHERE status = 'pending' OR status = 'error'")
     suspend fun getPendingOrError(): List<DocumentEntity>
 
@@ -77,7 +84,15 @@ interface DocumentDao {
     // Token matching happens in Kotlin (SearchRepository): SQLite's lower() is
     // ASCII-only and instr() forces contiguous-phrase semantics, so the SQL only
     // narrows by status and folder filter.
-    @Query("SELECT id, uri, filename, treeUri, indexedAt FROM documents WHERE status = 'indexed' AND (:filterByFolder = 0 OR treeUri IN (:treeUris)) AND (:minIndexedAt = 0 OR indexedAt >= :minIndexedAt)")
+    @Query("""
+        SELECT d.id, d.uri, d.filename, d.treeUri, d.indexedAt,
+               d.derivedTitle, dt.title AS customTitle
+        FROM documents d
+        LEFT JOIN document_titles dt ON dt.docUri = d.uri
+        WHERE d.status = 'indexed'
+          AND (:filterByFolder = 0 OR d.treeUri IN (:treeUris))
+          AND (:minIndexedAt = 0 OR d.indexedAt >= :minIndexedAt)
+    """)
     suspend fun indexedFilenameRows(filterByFolder: Int, treeUris: List<String>, minIndexedAt: Long): List<FilenameSearchRow>
 
     @Query("SELECT DISTINCT treeUri FROM documents WHERE treeUri != ''")
@@ -93,9 +108,16 @@ data class FilenameSearchRow(
     val filename: String,
     val treeUri: String,
     val indexedAt: Long?,
+    val derivedTitle: String?,
+    val customTitle: String?,
 )
 
 data class DocIdUri(val id: Long, val uri: String)
+
+data class DocTitleCandidate(
+    val id: Long,
+    val filename: String,
+)
 
 data class FolderStatsRow(
     val treeUri: String,

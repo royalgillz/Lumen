@@ -19,6 +19,9 @@ data class DocumentEntity(
     /** When the viewer last opened this document — user recency, distinct from
      *  indexedAt (system recency). Null until first opened. */
     val lastOpenedAt: Long? = null,
+    /** Auto-extracted display title. Null = never attempted; "" = attempted,
+     *  nothing trustworthy found (DocumentTitles.NONE). Recomputed on index. */
+    val derivedTitle: String? = null,
 ) {
     companion object {
         const val STATUS_PENDING = "pending"
@@ -28,3 +31,22 @@ data class DocumentEntity(
         const val STATUS_ERROR = "error"
     }
 }
+
+/**
+ * The re-index upsert's entity merge: the indexer owns extraction columns
+ * (status, pageCount, derivedTitle, …) and must preserve identity and
+ * user-recency columns from the existing row — the REPLACE strategy wipes
+ * anything not threaded through (this once silently reset lastOpenedAt on
+ * every rescan).
+ */
+// @spec LIB-TTL-009
+fun mergeForReindex(existing: DocumentEntity?, fresh: DocumentEntity): DocumentEntity =
+    if (existing == null) {
+        fresh
+    } else {
+        fresh.copy(
+            id = existing.id,
+            addedAt = existing.addedAt,
+            lastOpenedAt = existing.lastOpenedAt,
+        )
+    }

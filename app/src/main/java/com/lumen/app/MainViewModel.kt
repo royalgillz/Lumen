@@ -2,7 +2,11 @@ package com.lumen.app
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.data.fs.SafRepository
+import com.lumen.app.domain.model.DocumentTitles
+import kotlinx.coroutines.Dispatchers
 import com.lumen.app.domain.usecase.IndexLibraryUseCase
 import com.lumen.app.ui.navigation.NavLayoutMode
 import com.lumen.app.ui.navigation.startDestinationFor
@@ -21,6 +25,8 @@ import javax.inject.Inject
 class MainViewModel @Inject constructor(
     private val safRepository: SafRepository,
     private val indexLibraryUseCase: IndexLibraryUseCase,
+    private val documentDao: DocumentDao,
+    private val pageTextDao: PageTextDao,
 ) : ViewModel() {
 
     // null = still loading from DataStore; UI waits before composing anything.
@@ -43,6 +49,22 @@ class MainViewModel @Inject constructor(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     init {
+        // One-time title backfill for documents indexed before v11: derives from
+        // stored page-0 text only (no PDF is opened). Self-gated — the NULL
+        // column IS the "not yet attempted" flag, so this no-ops once done.
+        // Racing IndexWorker is harmless: indexing recomputes from fresher data.
+        // @spec LIB-TTL-008
+        viewModelScope.launch(Dispatchers.IO) {
+            documentDao.docsNeedingTitles().forEach { doc ->
+                val derived = DocumentTitles.deriveTitle(
+                    metadataTitle = null,
+                    pageZeroText = pageTextDao.pageZeroText(doc.id),
+                    filename = doc.filename,
+                )
+                documentDao.updateDerivedTitle(doc.id, derived)
+            }
+        }
+
         // Re-enqueue indexing for all saved folders at most once per 6 hours.
         // IndexWorker skips files whose lastModified hasn't changed, so this
         // only does real work when new or modified PDFs are present.

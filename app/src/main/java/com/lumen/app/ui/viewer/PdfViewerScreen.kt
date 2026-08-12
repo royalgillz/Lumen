@@ -147,6 +147,7 @@ fun PdfViewerScreen(
     val parsedUriIsValid = remember(uri) { runCatching { Uri.parse(uri) }.getOrNull() != null }
 
     val documentState by viewModel.documentState.collectAsState()
+    val resolvedTitle by viewModel.displayTitle.collectAsState()
     val scrollHorizontal by viewModel.scrollHorizontal.collectAsState()
     val matchPages by viewModel.matchPages.collectAsState()
     val occurrenceOrdinal by viewModel.occurrenceOrdinal.collectAsState()
@@ -788,7 +789,10 @@ fun PdfViewerScreen(
                         }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = filename,
+                                // Display title, falling back to the filename arg
+                                // (which keeps serving share/print/save-copy).
+                                // @spec SEARCH-UI-006
+                                text = resolvedTitle ?: filename,
                                 style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,

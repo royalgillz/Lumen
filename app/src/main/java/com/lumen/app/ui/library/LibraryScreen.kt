@@ -11,8 +11,10 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,8 +50,10 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -87,6 +91,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.dao.FolderStatsRow
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.domain.model.DocumentTitles
 import com.lumen.app.domain.model.LibraryCounts
 import com.lumen.app.domain.model.indexWarningLine
 import com.lumen.app.ui.common.PdfThumbnail
@@ -113,6 +118,8 @@ fun LibraryScreen(
     val folderStats by viewModel.folderStats.collectAsState()
     val sortOrder by viewModel.sortOrder.collectAsState()
     val bookmarkCounts by viewModel.bookmarkCounts.collectAsState()
+    val customTitles by viewModel.customTitles.collectAsState()
+    var renameTarget by remember { mutableStateOf<DocumentEntity?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -126,6 +133,18 @@ fun LibraryScreen(
     }
 
     LibraryDocumentSheetHost(viewModel = viewModel, onOpenDocument = onOpenDocument)
+
+    renameTarget?.let { doc ->
+        RenameDocumentDialog(
+            currentTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
+            hasCustomTitle = customTitles.containsKey(doc.uri),
+            onSave = { newTitle ->
+                viewModel.renameDocument(doc.uri, newTitle)
+                renameTarget = null
+            },
+            onDismiss = { renameTarget = null },
+        )
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -195,6 +214,7 @@ fun LibraryScreen(
                         libraryDocumentsItems(
                             visibleDocuments = visibleDocuments,
                             bookmarkCounts = bookmarkCounts,
+                            customTitles = customTitles,
                             bookmarkedOnly = bookmarkedOnly,
                             gridMode = gridMode,
                             sortOrder = sortOrder,
@@ -202,6 +222,7 @@ fun LibraryScreen(
                             onToggleGrid = { gridMode = !gridMode },
                             onSetSortOrder = { viewModel.setSortOrder(it) },
                             onTapDocument = { viewModel.showDocumentDetail(it) },
+                            onLongPressDocument = { renameTarget = it },
                             onRetryDocument = { viewModel.retryDocument(it) },
                         )
                     }
@@ -421,18 +442,25 @@ private fun formatCount(n: Int): String = when {
     else -> n.toString()
 }
 
+// Primary line = display title; the raw filename survives as a middle-ellipsized
+// caption (the suffix is the distinguishing part of generated names). Long-press
+// renames.
+// @spec LIB-TTL-001, LIB-TTL-003, LIB-TTL-004
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DocumentRow(
     doc: DocumentEntity,
+    displayTitle: String,
     bookmarkCount: Int,
     onRetry: (() -> Unit)?,
     onTap: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 3.dp)
-            .clickable(onClick = onTap),
+            .combinedClickable(onClick = onTap, onLongClick = onLongPress),
         shape = RoundedCornerShape(10.dp),
         tonalElevation = 1.dp,
     ) {
@@ -450,7 +478,16 @@ private fun DocumentRow(
                     modifier = Modifier.size(22.dp),
                 )
                 Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
-                    Text(text = doc.filename, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(text = displayTitle, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (displayTitle != doc.filename) {
+                        Text(
+                            text = doc.filename,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.MiddleEllipsis,
+                        )
+                    }
                     Text(
                         text = statusLabel(doc),
                         style = MaterialTheme.typography.labelSmall,
@@ -493,12 +530,16 @@ private fun DocumentRow(
     }
 }
 
+// @spec LIB-TTL-001, LIB-TTL-003, LIB-TTL-004
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DocumentGridCard(
     doc: DocumentEntity,
+    displayTitle: String,
     bookmarkCount: Int,
     modifier: Modifier = Modifier,
     onTap: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     val statusColor = when (doc.status) {
         DocumentEntity.STATUS_INDEXED -> MaterialTheme.colorScheme.primary
@@ -507,7 +548,7 @@ private fun DocumentGridCard(
         else -> MaterialTheme.colorScheme.outline
     }
     Surface(
-        modifier = modifier.clickable(onClick = onTap),
+        modifier = modifier.combinedClickable(onClick = onTap, onLongClick = onLongPress),
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 1.dp,
     ) {
@@ -569,11 +610,20 @@ private fun DocumentGridCard(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                text = doc.filename,
+                text = displayTitle,
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (displayTitle != doc.filename) {
+                Text(
+                    text = doc.filename,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1,
+                    overflow = TextOverflow.MiddleEllipsis,
+                )
+            }
         }
     }
 }
@@ -601,6 +651,7 @@ private fun statusLabel(doc: DocumentEntity): String {
 @Composable
 private fun DocumentDetailSheet(
     doc: DocumentEntity,
+    displayTitle: String,
     ocrPageCount: Int,
     bookmarks: List<BookmarkEntity>,
     onReindex: () -> Unit,
@@ -615,12 +666,21 @@ private fun DocumentDetailSheet(
             .padding(bottom = 32.dp),
     ) {
         Text(
-            text = doc.filename,
+            text = displayTitle,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
+        if (displayTitle != doc.filename) {
+            Text(
+                text = doc.filename,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 1,
+                overflow = TextOverflow.MiddleEllipsis,
+            )
+        }
         Spacer(Modifier.height(4.dp))
         Text(
             text = when (doc.status) {
@@ -805,6 +865,50 @@ internal fun LostAccessBanner(folderCount: Int) {
     }
 }
 
+// Prefilled with the current display title; Save with blank input resets to
+// automatic, as does the explicit reset action.
+// @spec LIB-TTL-004
+@Composable
+internal fun RenameDocumentDialog(
+    currentTitle: String,
+    hasCustomTitle: Boolean,
+    onSave: (String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var input by remember { mutableStateOf(currentTitle) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename document") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it.take(120) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Only the name shown in Lumen changes — the file itself is untouched.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(input) }) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                if (hasCustomTitle) {
+                    TextButton(onClick = { onSave(null) }) { Text("Reset to automatic") }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
+}
+
 /** The document detail bottom sheet, hosted by any screen showing library rows. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -815,10 +919,13 @@ internal fun LibraryDocumentSheetHost(
     val selectedDocument by viewModel.selectedDocument.collectAsState()
     val selectedDocOcrPages by viewModel.selectedDocOcrPages.collectAsState()
     val selectedDocBookmarks by viewModel.selectedDocBookmarks.collectAsState()
+    val customTitles by viewModel.customTitles.collectAsState()
     if (selectedDocument != null) {
         ModalBottomSheet(onDismissRequest = { viewModel.hideDocumentDetail() }) {
+            val doc = selectedDocument!!
             DocumentDetailSheet(
-                doc = selectedDocument!!,
+                doc = doc,
+                displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
                 ocrPageCount = selectedDocOcrPages,
                 bookmarks = selectedDocBookmarks,
                 onReindex = {
@@ -849,6 +956,7 @@ internal fun LibraryDocumentSheetHost(
 internal fun LazyListScope.libraryDocumentsItems(
     visibleDocuments: List<DocumentEntity>,
     bookmarkCounts: Map<String, Int>,
+    customTitles: Map<String, String>,
     bookmarkedOnly: Boolean,
     gridMode: Boolean,
     sortOrder: LibrarySortOrder,
@@ -856,6 +964,7 @@ internal fun LazyListScope.libraryDocumentsItems(
     onToggleGrid: () -> Unit,
     onSetSortOrder: (LibrarySortOrder) -> Unit,
     onTapDocument: (DocumentEntity) -> Unit,
+    onLongPressDocument: (DocumentEntity) -> Unit,
     onRetryDocument: (DocumentEntity) -> Unit,
 ) {
     item {
@@ -945,11 +1054,13 @@ internal fun LazyListScope.libraryDocumentsItems(
         items(visibleDocuments, key = { it.id }) { doc ->
             DocumentRow(
                 doc = doc,
+                displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
                 bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
                 onRetry = if (doc.status == DocumentEntity.STATUS_ERROR) {
                     { onRetryDocument(doc) }
                 } else null,
                 onTap = { onTapDocument(doc) },
+                onLongPress = { onLongPressDocument(doc) },
             )
         }
     } else {
@@ -963,9 +1074,11 @@ internal fun LazyListScope.libraryDocumentsItems(
                 chunk.forEach { doc ->
                     DocumentGridCard(
                         doc = doc,
+                        displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
                         bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
                         modifier = Modifier.weight(1f),
                         onTap = { onTapDocument(doc) },
+                        onLongPress = { onLongPressDocument(doc) },
                     )
                 }
                 if (chunk.size == 1) {

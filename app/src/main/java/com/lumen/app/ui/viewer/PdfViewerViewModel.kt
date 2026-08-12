@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.lumen.app.data.db.FtsQuerySanitizer
 import com.lumen.app.data.db.dao.BookmarkDao
 import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.dao.DocumentTitleDao
 import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
@@ -17,6 +18,7 @@ import com.lumen.app.data.pdf.PdfHighlighter
 import com.lumen.app.data.repository.SearchRepository
 import com.lumen.app.data.text.NormalizedMatcher
 import com.lumen.app.di.ApplicationScope
+import com.lumen.app.domain.model.DocumentTitles
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +50,7 @@ class PdfViewerViewModel @Inject constructor(
     private val safRepository: SafRepository,
     private val pageDao: PageDao,
     private val documentDao: DocumentDao,
+    private val documentTitleDao: DocumentTitleDao,
     private val bookmarkDao: BookmarkDao,
     @ApplicationScope private val appScope: CoroutineScope,
 ) : AndroidViewModel(application) {
@@ -72,6 +75,11 @@ class PdfViewerViewModel @Inject constructor(
 
     private val _documentState = MutableStateFlow<DocumentState>(DocumentState.Idle)
     val documentState: StateFlow<DocumentState> = _documentState.asStateFlow()
+
+    // Resolved display title (customTitle > derivedTitle > filename) for the
+    // top bar; null until resolved or when the document has no library row.
+    private val _displayTitle = MutableStateFlow<String?>(null)
+    val displayTitle: StateFlow<String?> = _displayTitle.asStateFlow()
 
     private var openJob: Job? = null
     private var currentRenderer: MuPdfPageRenderer? = null
@@ -139,6 +147,23 @@ class PdfViewerViewModel @Inject constructor(
                     appScope.launch {
                         runCatching {
                             documentDao.markOpened(parsedUri.toString(), System.currentTimeMillis())
+                        }
+                    }
+                    // Top-bar title: resolved from the title store by URI; the
+                    // screen falls back to its filename argument (which keeps
+                    // serving file operations) when no row exists.
+                    // @spec SEARCH-UI-006
+                    viewModelScope.launch {
+                        runCatching {
+                            val uriStr = parsedUri.toString()
+                            val doc = documentDao.getByUri(uriStr)
+                            _displayTitle.value = doc?.let {
+                                DocumentTitles.displayTitle(
+                                    documentTitleDao.getTitle(uriStr),
+                                    it.derivedTitle,
+                                    it.filename,
+                                )
+                            }
                         }
                     }
                 }

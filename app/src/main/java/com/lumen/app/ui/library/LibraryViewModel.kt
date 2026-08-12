@@ -8,10 +8,12 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.lumen.app.data.db.dao.BookmarkDao
 import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.dao.DocumentTitleDao
 import com.lumen.app.data.db.dao.FolderStatsRow
 import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.data.db.entity.DocumentTitleEntity
 import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.repository.LibraryRepository
 import com.lumen.app.di.ApplicationScope
@@ -42,6 +44,7 @@ class LibraryViewModel @Inject constructor(
     private val pageDao: PageDao,
     private val documentDao: DocumentDao,
     private val bookmarkDao: BookmarkDao,
+    private val documentTitleDao: DocumentTitleDao,
     private val safRepository: SafRepository,
     @ApplicationScope private val appScope: CoroutineScope,
 ) : ViewModel() {
@@ -100,6 +103,27 @@ class LibraryViewModel @Inject constructor(
     val bookmarkCounts: StateFlow<Map<String, Int>> = bookmarkDao.observeCountsByDocument()
         .map { rows -> rows.associate { it.docUri to it.count } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    /** docUri → user rename, resolved ahead of derived titles and filenames. */
+    val customTitles: StateFlow<Map<String, String>> = documentTitleDao.observeAll()
+        .map { rows -> rows.associate { it.docUri to it.title } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    /** Blank or null resets to automatic (deletes the row); input capped at 120
+     *  chars to match the derivation gate. App scope: the write must land even
+     *  if the user leaves the screen immediately.
+     */
+    // @spec LIB-TTL-004, LIB-TTL-005
+    fun renameDocument(docUri: String, title: String?) {
+        appScope.launch {
+            val trimmed = title?.trim()?.take(120)
+            if (trimmed.isNullOrEmpty()) {
+                documentTitleDao.delete(docUri)
+            } else {
+                documentTitleDao.upsert(DocumentTitleEntity(docUri = docUri, title = trimmed))
+            }
+        }
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val selectedDocBookmarks: StateFlow<List<BookmarkEntity>> = selectedDocument

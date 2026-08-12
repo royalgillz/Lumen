@@ -8,6 +8,7 @@ import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.data.text.NormalizedMatcher
 import com.lumen.app.data.text.SnippetBuilder
 import com.lumen.app.data.text.TextNormalizer
+import com.lumen.app.domain.model.DocumentTitles
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
@@ -80,8 +81,8 @@ class SearchRepository @Inject constructor(
                 minIndexedAt = minIndexedAt,
             )
                 .filter { row ->
-                    val basename = normalizedBasename(row.filename)
-                    queryTokens.all { basename.contains(it) }
+                    val targets = nameMatchTargets(row.filename, row.customTitle)
+                    queryTokens.all { token -> targets.any { it.contains(token) } }
                 }
                 .filter { row -> candidates.none { it.docId == row.id } }
                 .take(FILENAME_MATCH_LIMIT)
@@ -124,6 +125,7 @@ class SearchRepository @Inject constructor(
                     docId = row.id,
                     uri = row.uri,
                     filename = row.filename,
+                    displayTitle = DocumentTitles.displayTitle(row.customTitle, row.derivedTitle, row.filename),
                     pageNumber = 0,
                     lineNumber = 0,
                     snippet = "Filename matches your query.",
@@ -139,6 +141,7 @@ class SearchRepository @Inject constructor(
                     docId = row.docId,
                     uri = row.uri,
                     filename = row.filename,
+                    displayTitle = DocumentTitles.displayTitle(row.customTitle, row.derivedTitle, row.filename),
                     pageNumber = row.pageNumber,
                     lineNumber = 0,
                     snippet = "", // filled from original text below, displayed rows only
@@ -190,20 +193,24 @@ class SearchRepository @Inject constructor(
         pageTextDao.searchPagesInDocument(sanitizedQuery, docUri)
 
     /** Precomputed matchinfo hits on the page + a boost per normalized token
-     *  that also appears in the normalized basename. */
+     *  that also appears in the document's name (basename or custom title). */
     private fun relevanceScore(row: PageSearchRow, hits: Int, queryTokens: List<String>): Int {
         var score = hits
         if (queryTokens.isNotEmpty()) {
-            val basename = normalizedBasename(row.filename)
-            score += queryTokens.count { basename.contains(it) } * FILENAME_TOKEN_BOOST
+            val targets = nameMatchTargets(row.filename, row.customTitle)
+            score += queryTokens.count { token -> targets.any { it.contains(token) } } * FILENAME_TOKEN_BOOST
         }
         return score
     }
 
-    /** Extension stripped, then normalized + lowercased — the filename side of
-     *  SEARCH-QRY-004's "one definition of matches". */
-    private fun normalizedBasename(filename: String): String =
-        TextNormalizer.normalize(filename.substringBeforeLast('.')).lowercase()
+    /** The document-name match targets of SEARCH-QRY-004: the extension-stripped
+     *  normalized basename, plus the normalized custom title when one exists.
+     *  Derived titles are not matched — they come from indexed page text. */
+    private fun nameMatchTargets(filename: String, customTitle: String?): List<String> =
+        listOfNotNull(
+            TextNormalizer.normalize(filename.substringBeforeLast('.')).lowercase(),
+            customTitle?.let { TextNormalizer.normalize(it).lowercase() }?.takeIf { it.isNotEmpty() },
+        )
 
     /**
      * Parse an FTS4 matchinfo blob in 'pcx' format: [p][c] then, per phrase and

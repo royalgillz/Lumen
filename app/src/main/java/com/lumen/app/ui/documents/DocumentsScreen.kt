@@ -7,12 +7,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.domain.model.DocumentTitles
 import com.lumen.app.ui.library.IndexHealthCard
+import com.lumen.app.ui.library.RenameDocumentDialog
 import com.lumen.app.ui.library.LibraryDocumentSheetHost
 import com.lumen.app.ui.library.LibraryEmptyState
 import com.lumen.app.ui.library.LibraryViewModel
@@ -45,9 +48,11 @@ fun DocumentsScreen(
     val folderStats by libraryViewModel.folderStats.collectAsState()
     val sortOrder by libraryViewModel.sortOrder.collectAsState()
     val bookmarkCounts by libraryViewModel.bookmarkCounts.collectAsState()
+    val customTitles by libraryViewModel.customTitles.collectAsState()
     val lostPermissionFolders by libraryViewModel.lostPermissionFolders.collectAsState()
     var gridMode by rememberSaveable { mutableStateOf(true) }
     var bookmarkedOnly by rememberSaveable { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<DocumentEntity?>(null) }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -56,6 +61,18 @@ fun DocumentsScreen(
     }
 
     LibraryDocumentSheetHost(viewModel = libraryViewModel, onOpenDocument = onOpenDocument)
+
+    renameTarget?.let { doc ->
+        RenameDocumentDialog(
+            currentTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
+            hasCustomTitle = customTitles.containsKey(doc.uri),
+            onSave = { newTitle ->
+                libraryViewModel.renameDocument(doc.uri, newTitle)
+                renameTarget = null
+            },
+            onDismiss = { renameTarget = null },
+        )
+    }
 
     val libraryIdleContent: LazyListScope.() -> Unit = {
         if (isContentLoaded && folders.isEmpty() && documents.isEmpty()) {
@@ -85,6 +102,7 @@ fun DocumentsScreen(
                 libraryDocumentsItems(
                     visibleDocuments = visibleDocuments,
                     bookmarkCounts = bookmarkCounts,
+                    customTitles = customTitles,
                     bookmarkedOnly = bookmarkedOnly,
                     gridMode = gridMode,
                     sortOrder = sortOrder,
@@ -92,6 +110,7 @@ fun DocumentsScreen(
                     onToggleGrid = { gridMode = !gridMode },
                     onSetSortOrder = { libraryViewModel.setSortOrder(it) },
                     onTapDocument = { doc: DocumentEntity -> libraryViewModel.showDocumentDetail(doc) },
+                    onLongPressDocument = { renameTarget = it },
                     onRetryDocument = { libraryViewModel.retryDocument(it) },
                 )
             }

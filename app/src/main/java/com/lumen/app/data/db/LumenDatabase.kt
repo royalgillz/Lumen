@@ -6,10 +6,12 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lumen.app.data.db.dao.BookmarkDao
 import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.dao.DocumentTitleDao
 import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.data.db.entity.DocumentTitleEntity
 import com.lumen.app.data.db.entity.PageEntity
 import com.lumen.app.data.db.entity.PageTextEntity
 import com.lumen.app.data.db.entity.PageTextFtsEntity
@@ -22,8 +24,9 @@ import com.lumen.app.data.text.TextNormalizer
         PageTextEntity::class,
         PageTextFtsEntity::class,
         BookmarkEntity::class,
+        DocumentTitleEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = true
 )
 abstract class LumenDatabase : RoomDatabase() {
@@ -31,6 +34,7 @@ abstract class LumenDatabase : RoomDatabase() {
     abstract fun pageDao(): PageDao
     abstract fun pageTextDao(): PageTextDao
     abstract fun bookmarkDao(): BookmarkDao
+    abstract fun documentTitleDao(): DocumentTitleDao
 
     companion object {
         val MIGRATION_3_4 = object : Migration(3, 4) {
@@ -107,6 +111,19 @@ abstract class LumenDatabase : RoomDatabase() {
                         "USING FTS4(`textNorm` TEXT NOT NULL, tokenize=unicode61, content=`page_text`)"
                 )
                 database.execSQL("INSERT INTO page_text_fts(page_text_fts) VALUES('rebuild')")
+            }
+        }
+
+        // Display titles: URI-keyed rename store (survives row deletion, like
+        // bookmarks) + the derived-title column the indexer recomputes.
+        // @spec LIB-TTL-002
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE documents ADD COLUMN derivedTitle TEXT")
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `document_titles` " +
+                        "(`docUri` TEXT NOT NULL, `title` TEXT NOT NULL, PRIMARY KEY(`docUri`))"
+                )
             }
         }
 

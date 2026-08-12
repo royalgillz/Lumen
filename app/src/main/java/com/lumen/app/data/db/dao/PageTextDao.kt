@@ -21,11 +21,13 @@ interface PageTextDao {
     @Query("""
         SELECT t.pageId AS pageId, p.pageNumber, p.isOcr,
                matchinfo(page_text_fts, 'pcx') AS matchInfo,
-               d.id AS docId, d.uri, d.filename, d.treeUri, d.indexedAt
+               d.id AS docId, d.uri, d.filename, d.treeUri, d.indexedAt,
+               d.derivedTitle, dt.title AS customTitle
         FROM page_text_fts
         JOIN page_text AS t ON page_text_fts.rowid = t.pageId
         JOIN pages     AS p ON t.pageId = p.id
         JOIN documents AS d ON p.docId = d.id
+        LEFT JOIN document_titles AS dt ON dt.docUri = d.uri
         WHERE page_text_fts MATCH :query
           AND d.status = 'indexed'
           AND (:filterByFolder = 0 OR d.treeUri IN (:treeUris))
@@ -41,6 +43,15 @@ interface PageTextDao {
         minIndexedAt: Long,
         limit: Int,
     ): List<PageSearchRow>
+
+    // Page-0 text for title derivation (indexing recomputes; backfill fills NULLs).
+    @Query("""
+        SELECT t.text FROM page_text t
+        JOIN pages p ON t.pageId = p.id
+        WHERE p.docId = :docId AND p.pageNumber = 0
+        LIMIT 1
+    """)
+    suspend fun pageZeroText(docId: Long): String?
 
     // Original text for the displayed rows only — snippets are built in Kotlin
     // from original text (the FTS column holds normalized text), and fetching
@@ -72,6 +83,8 @@ data class PageSearchRow(
     val filename: String,
     val treeUri: String,
     val indexedAt: Long?,
+    val derivedTitle: String?,
+    val customTitle: String?,
 )
 
 data class PageTextRow(
