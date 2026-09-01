@@ -1,6 +1,9 @@
 package com.lumen.app.ui.navigation
 
+import android.app.Activity
+import android.content.ContextWrapper
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -13,8 +16,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -22,7 +25,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
-import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -31,6 +33,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.domain.model.PendingSearch
 import com.lumen.app.ui.documents.DocumentsScreen
 import com.lumen.app.ui.library.LibraryScreen
 import com.lumen.app.ui.onboarding.OnboardingScreen
@@ -52,17 +55,29 @@ sealed class Screen(val route: String) {
 }
 
 private const val PDF_VIEWER_ROUTE =
-    "pdf_viewer?uri={uri}&page={page}&filename={filename}&keyword={keyword}&occ={occ}"
+    "pdf_viewer?uri={uri}&page={page}&filename={filename}&keyword={keyword}&occ={occ}&req={req}"
 
+// [deliveryId]: the external VIEW-intent request id (0 for in-app opens). A
+// singleTop redelivery of the SAME document must change the route arguments,
+// or the viewer's open effect never re-fires — a viewer sitting on the expired
+// screen would silently ignore the fresh grant the redelivery carries.
+// @spec VIEW-EXT-010
 private fun pdfViewerRoute(
     uri: String,
     page: Int,
     filename: String,
     keyword: String = "",
     occurrence: Int = 0,
+    deliveryId: Long = 0L,
 ): String =
     "pdf_viewer?uri=${Uri.encode(uri)}&page=$page" +
-        "&filename=${Uri.encode(filename)}&keyword=${Uri.encode(keyword)}&occ=$occurrence"
+        "&filename=${Uri.encode(filename)}&keyword=${Uri.encode(keyword)}&occ=$occurrence&req=$deliveryId"
+
+private tailrec fun android.content.Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 private data class Tab(val screen: Screen, val label: String, val icon: @Composable (Boolean) -> Unit)
 
@@ -95,53 +110,105 @@ fun LumenNavGraph(
     startDestination: String = Screen.Search.route,
     layoutMode: NavLayoutMode = NavLayoutMode.THREE_TAB,
     externalPdfUri: String? = null,
+    externalPdfName: String? = null,
+    externalPdfRequestId: Long = 0L,
 ) {
-    // Outside key(): survives the graph rebuild on a layout switch so the same
-    // external PDF is not pushed twice. Saveable: a plain remember reset on
-    // rotation, so the effect below re-fired and pushed a second viewer.
-    val handledExternalUri = rememberSaveable { mutableStateOf<String?>(null) }
-    // Distinguishes a mid-session layout switch from first composition or
-    // process restore — only the switch restores Settings.
-    var lastLayoutMode by rememberSaveable { mutableStateOf<String?>(null) }
+    // Saveable: rotation and process restore replay the sticky intent under
+    // its original request id, which must stay suppressed. Guarded by delivery
+    // id rather than URI so re-sending the same document is a fresh delivery
+    // that reopens the viewer.
+    // @spec NAV-012
+    val handledExternalRequestId = rememberSaveable { mutableStateOf(0L) }
 
-    // The graph is keyed on the layout: switching rebuilds it at the new mode's
-    // start destination (back stack discarded), then restores Settings so the
-    // user watches the bar change in place.
+    // One NavController and one graph for the activity's whole life: a layout
+    // switch changes only derived values (bar, mode home, re-root rules) — no
+    // navigation, no teardown, so the Settings screen under the toggle keeps
+    // its entry, state, and ViewModels. The graph's start is frozen at first
+    // composition; the caller's startDestination recomputes per mode and must
+    // not reach the NavHost, or the graph would rebuild.
     // @spec NAV-004
-    key(layoutMode) {
-        val navController = rememberNavController()
-        val navBackStackEntry by navController.currentBackStackEntryAsState()
-        val currentRoute = navBackStackEntry?.destination?.route
-        val tabs = tabsFor(layoutMode)
-        val tabRoutes = tabRoutesFor(layoutMode).toSet()
+    val graphStart = rememberSaveable { startDestination }
+    // The stack's current root — updated only at the re-root sites (home-tab
+    // tap, back guard, onboarding completion). Navigation instance state
+    // restores the matching stack alongside it.
+    // @spec NAV-014
+    var stackRoot by rememberSaveable { mutableStateOf(graphStart) }
 
-        LaunchedEffect(externalPdfUri) {
-            val uri = externalPdfUri ?: return@LaunchedEffect
-            if (handledExternalUri.value == uri) return@LaunchedEffect
-            handledExternalUri.value = uri
-            val filename = runCatching { Uri.parse(uri).lastPathSegment }
+    val navController = rememberNavController()
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
+    val tabs = tabsFor(layoutMode)
+    val tabRoutes = tabRoutesFor(layoutMode).toSet()
+
+    // @spec NAV-012
+    LaunchedEffect(externalPdfRequestId) {
+        val uri = externalPdfUri ?: return@LaunchedEffect
+        if (handledExternalRequestId.value == externalPdfRequestId) return@LaunchedEffect
+        handledExternalRequestId.value = externalPdfRequestId
+        val filename = externalPdfName?.takeIf { it.isNotBlank() }
+            ?: runCatching { Uri.parse(uri).lastPathSegment }
                 .getOrNull().orEmpty().ifBlank { "PDF" }
-            navController.navigate(pdfViewerRoute(uri, page = 0, filename = filename)) {
-                launchSingleTop = true
-            }
+        navController.navigate(
+            pdfViewerRoute(uri, page = 0, filename = filename, deliveryId = externalPdfRequestId)
+        ) {
+            launchSingleTop = true
         }
+    }
 
-        LaunchedEffect(Unit) {
-            if (lastLayoutMode != null && lastLayoutMode != layoutMode.name) {
-                navController.navigate(Screen.Settings.route) { launchSingleTop = true }
-            }
-            lastLayoutMode = layoutMode.name
+    // A launcher search delivery (shortcut, widget, ACTION_PROCESS_TEXT) must
+    // also SURFACE a search screen: the ViewModels apply the query wherever
+    // they live, but the user may be resumed on Settings, Library, or inside
+    // the viewer. Guarded like the external-PDF delivery above — saveable
+    // handled id plus the request freshness window, so rotation and process
+    // restore never re-navigate. Plain bar-shaped navigation; stackRoot and
+    // the switch machinery are untouched.
+    // @spec SEARCH-ENTRY-008
+    val handledSearchRequestId = rememberSaveable { mutableStateOf(0L) }
+    val pendingSearch by PendingSearch.request.collectAsState()
+    LaunchedEffect(pendingSearch?.id) {
+        val request = pendingSearch ?: return@LaunchedEffect
+        if (handledSearchRequestId.value == request.id) return@LaunchedEffect
+        if (!PendingSearch.isFresh(request)) return@LaunchedEffect
+        handledSearchRequestId.value = request.id
+        val home = modeHomeFor(layoutMode)
+        if (currentRoute != home) {
+            navController.navigate(home) { barNavOptions(stackRoot) }
         }
+    }
 
-        LumenScaffold(
-            navController = navController,
-            currentRoute = currentRoute,
-            navBackStackEntry = navBackStackEntry,
-            tabs = tabs,
-            tabRoutes = tabRoutes,
-            startDestination = startDestination,
-            layoutMode = layoutMode,
-        )
+    LumenScaffold(
+        navController = navController,
+        currentRoute = currentRoute,
+        navBackStackEntry = navBackStackEntry,
+        tabs = tabs,
+        tabRoutes = tabRoutes,
+        startDestination = graphStart,
+        layoutMode = layoutMode,
+        stackRoot = stackRoot,
+        onStackRootChange = { stackRoot = it },
+    )
+
+    // A stale root (the mode changed since the stack was rooted) must never be
+    // revealed by the system back control: on the mode home, back exits the
+    // app; on any other tab, back retargets to the mode home. Composed AFTER
+    // the scaffold: the back dispatcher is LIFO and the NavHost registers the
+    // NavController's own pop callback during its composition — this guard
+    // must register later to win while enabled. It is disabled on bar-less
+    // routes, so the viewer's and onboarding's own BackHandlers keep priority
+    // there.
+    // NavLayoutSwitchRoboTest exercises this wiring through the same shared
+    // functions; the harness there mirrors this host by hand and must be kept
+    // in step.
+    // @spec NAV-015
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val backTarget = backGuardTarget(currentRoute, layoutMode, stackRoot)
+    BackHandler(enabled = backTarget != null) {
+        val target = backTarget ?: return@BackHandler
+        if (currentRoute == target) {
+            context.findActivity()?.finish()
+        } else {
+            navController.navigate(target) { barNavOptions(stackRoot) }
+        }
     }
 }
 
@@ -154,6 +221,8 @@ private fun LumenScaffold(
     tabRoutes: Set<String>,
     startDestination: String,
     layoutMode: NavLayoutMode,
+    stackRoot: String,
+    onStackRootChange: (String) -> Unit,
 ) {
     Scaffold(
         bottomBar = {
@@ -165,12 +234,9 @@ private fun LumenScaffold(
                         NavigationBarItem(
                             selected = selected,
                             onClick = {
+                                // @spec NAV-014
                                 navController.navigate(tab.screen.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
-                                    }
-                                    launchSingleTop = true
-                                    restoreState = true
+                                    barNavOptions(stackRoot)
                                 }
                             },
                             icon = { tab.icon(selected) },
@@ -202,10 +268,13 @@ private fun LumenScaffold(
                 val onboardingVm: OnboardingViewModel = hiltViewModel()
                 OnboardingScreen(onFinished = {
                     onboardingVm.markDone()
-                    // @spec NAV-003 — the current mode's home, never a hardcoded route.
-                    navController.navigate(startDestinationFor(onboardingDone = true, layout = layoutMode)) {
+                    // @spec NAV-003 — the current mode's home, never a hardcoded
+                    // route; completion roots the stack there (NAV-014).
+                    val home = modeHomeFor(layoutMode)
+                    navController.navigate(home) {
                         popUpTo(Screen.Onboarding.route) { inclusive = true }
                     }
+                    onStackRootChange(home)
                 })
             }
             composable(Screen.Search.route) {
@@ -218,11 +287,7 @@ private fun LumenScaffold(
                     },
                     onOpenLibrary = {
                         navController.navigate(Screen.Library.route) {
-                            popUpTo(navController.graph.findStartDestination().id) {
-                                saveState = true
-                            }
-                            launchSingleTop = true
-                            restoreState = true
+                            barNavOptions(stackRoot)
                         }
                     },
                 )
@@ -251,7 +316,10 @@ private fun LumenScaffold(
                     },
                 )
             }
-            composable(Screen.Settings.route) { SettingsScreen() }
+            // The applied layout mode drives the Navigation toggle's selected
+            // state — the graph's own value can never go stale mid-switch.
+            // @spec NAV-010
+            composable(Screen.Settings.route) { SettingsScreen(appliedNavLayout = layoutMode) }
             composable(
                 route = PDF_VIEWER_ROUTE,
                 arguments = listOf(
@@ -260,6 +328,7 @@ private fun LumenScaffold(
                     navArgument("filename") { type = NavType.StringType; defaultValue = "" },
                     navArgument("keyword") { type = NavType.StringType; defaultValue = "" },
                     navArgument("occ") { type = NavType.IntType; defaultValue = 0 },
+                    navArgument("req") { type = NavType.LongType; defaultValue = 0L },
                 ),
             ) { backStackEntry ->
                 val uri = backStackEntry.arguments?.getString("uri") ?: ""
@@ -267,13 +336,27 @@ private fun LumenScaffold(
                 val filename = backStackEntry.arguments?.getString("filename") ?: ""
                 val keyword = backStackEntry.arguments?.getString("keyword") ?: ""
                 val occurrence = backStackEntry.arguments?.getInt("occ") ?: 0
+                val deliveryId = backStackEntry.arguments?.getLong("req") ?: 0L
                 PdfViewerScreen(
                     uri = uri,
                     pageNumber = page,
                     filename = filename,
                     keyword = keyword,
                     occurrence = occurrence,
+                    deliveryId = deliveryId,
                     onBack = { navController.popBackStack() },
+                    // A file rename changed the URI: replace this entry so the
+                    // route arguments carry the new identity — rotation and
+                    // process restore reopen the renamed file.
+                    // @spec LIB-REN-008
+                    onRenamed = { newUri, newFilename, currentPage ->
+                        navController.navigate(
+                            pdfViewerRoute(newUri, page = currentPage, filename = newFilename)
+                        ) {
+                            popUpTo(PDF_VIEWER_ROUTE) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    },
                 )
             }
         }

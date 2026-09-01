@@ -5,6 +5,8 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.DocumentsContract
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -46,6 +48,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.BrightnessLow
 import androidx.compose.material.icons.filled.BrightnessMedium
@@ -90,6 +93,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -116,6 +120,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.BookmarkEntity
+import com.lumen.app.data.fs.ExternalAccessOffer
+import com.lumen.app.data.fs.ExternalAccessPickerTargets
+import com.lumen.app.data.fs.LumenPdfsFolder
+import com.lumen.app.domain.usecase.KeepExternalAccessUseCase
 import com.lumen.app.ui.theme.LocalLumenDarkTheme
 import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.Dispatchers
@@ -132,8 +140,17 @@ fun PdfViewerScreen(
     filename: String,
     keyword: String = "",
     occurrence: Int = 0,
+    // External VIEW-intent request id (0 for in-app opens): a redelivery of
+    // the SAME document changes only this value, and it must re-attempt the
+    // open — the redelivery carries a fresh transient grant that can recover
+    // a Failed/expired state (VIEW-EXT-010).
+    deliveryId: Long = 0L,
     onBack: () -> Unit,
+    // A file rename changed the document's URI: the host replaces this nav
+    // entry so the route arguments carry the new URI (LIB-REN-008).
+    onRenamed: (newUri: String, newFilename: String, page: Int) -> Unit = { _, _, _ -> },
     viewModel: PdfViewerViewModel = hiltViewModel(),
+    libraryViewModel: com.lumen.app.ui.library.LibraryViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -157,32 +174,67 @@ fun PdfViewerScreen(
     val pageHighlights by viewModel.pageHighlights.collectAsState()
     val bookmarks by viewModel.bookmarks.collectAsState()
     val isScanningFallback by viewModel.isScanningFallback.collectAsState()
+    // Make-permanent offer state for the CURRENT external document (null for
+    // library documents); decided once per open by the ViewModel.
+    // @spec VIEW-EXT-003
+    val externalAccess by viewModel.externalAccess.collectAsState()
 
     // ── Viewer-only Compose state ─────────────────────────────────────────────
-    // After rotation the ViewModel remembers where the reader actually was; only a
-    // fresh open should start at the nav-arg page.
-    val initialPage = viewModel.lastViewedPage.takeIf { it >= 0 } ?: pageNumber
-    val displayPage = remember { mutableIntStateOf(initialPage) }
-    val pageCount = remember { mutableIntStateOf(0) }
-    var showPageJump by remember { mutableStateOf(false) }
-    var pageJumpInput by remember { mutableStateOf("") }
-    var showPasswordPrompt by remember { mutableStateOf(false) }
-    var passwordInput by remember { mutableStateOf("") }
+    // Per-document state carries the document URI as its remember key: a
+    // singleTop swap into a live viewer (an external VIEW intent) reuses this
+    // nav entry, and the old document's search/password/dialog state must not
+    // survive into the new one. Cross-document prefs (brightness, controls)
+    // stay unkeyed.
+    // @spec VIEW-SESS-002
+    //
+    // Page currently on screen, surviving process death (the ViewModel doesn't).
+    // After rotation the ViewModel remembers where the reader actually was; after
+    // process death this does; only a fresh open starts at the nav-arg page.
+    // @spec VIEW-SESS-001
+    var savedViewedPage by rememberSaveable(uri) { mutableIntStateOf(-1) }
+    // True only when the process was killed mid-session: the saveable page
+    // survived while the ViewModel restarted empty.
+    val restoredAfterProcessDeath = remember(uri) {
+        viewModel.lastViewedPage < 0 && savedViewedPage >= 0
+    }
+    val initialPage = viewModel.lastViewedPage.takeIf { it >= 0 }
+        ?: savedViewedPage.takeIf { it >= 0 }
+        ?: pageNumber
+    val displayPage = remember(uri) { mutableIntStateOf(initialPage) }
+    val pageCount = remember(uri) { mutableIntStateOf(0) }
+    var showPageJump by remember(uri) { mutableStateOf(false) }
+    var pageJumpInput by remember(uri) { mutableStateOf("") }
+    var showPasswordPrompt by remember(uri) { mutableStateOf(false) }
+    var passwordInput by remember(uri) { mutableStateOf("") }
     // Saveable: losing this on rotation reopened an unlocked encrypted PDF with a
     // null password and re-prompted the reader.
-    var activePdfPassword by rememberSaveable { mutableStateOf<String?>(null) }
+    var activePdfPassword by rememberSaveable(uri) { mutableStateOf<String?>(null) }
+    // Counts password submissions so resubmitting an identical (wrong) password
+    // still retries the open — the password value alone can't key the open effect.
+    // @spec VIEW-LOCK-001
+    var passwordAttempt by rememberSaveable(uri) { mutableIntStateOf(0) }
     // When opened from global search, pre-fill the in-document search bar with the
     // keyword so the reader can immediately step between occurrences.
-    var isViewerSearchActive by rememberSaveable { mutableStateOf(keyword.isNotBlank()) }
-    var viewerSearchText by rememberSaveable { mutableStateOf(keyword) }
+    var isViewerSearchActive by rememberSaveable(uri) { mutableStateOf(keyword.isNotBlank()) }
+    var viewerSearchText by rememberSaveable(uri) { mutableStateOf(keyword) }
     // The query whose highlights stay on screen when the search bar is hidden.
     // Cleared on explicit dismiss (X / toggle off) — falling back to the nav-arg
     // keyword there resurrected the original search and teleported the view back
     // to its first match.
-    var committedQuery by rememberSaveable { mutableStateOf(keyword) }
+    var committedQuery by rememberSaveable(uri) { mutableStateOf(keyword) }
     // Pass the tapped occurrence to the first search only.
-    var initialSearchDone by rememberSaveable { mutableStateOf(false) }
-    var resumePromptShown by rememberSaveable { mutableStateOf(false) }
+    var initialSearchDone by rememberSaveable(uri) { mutableStateOf(false) }
+    var resumePromptShown by rememberSaveable(uri) { mutableStateOf(false) }
+    // After process death the restored query re-runs only to rebuild highlights
+    // and counts — its landing jump must not steal the restored reading position.
+    // Fresh opens and rotation never set this flag.
+    // @spec VIEW-SESS-001
+    val restoredQuery = remember(uri) {
+        (if (isViewerSearchActive) viewerSearchText else committedQuery).trim()
+    }
+    var suppressRestoredSearchJump by remember(uri) {
+        mutableStateOf(restoredAfterProcessDeath && restoredQuery.length >= 2)
+    }
     var showBrightnessSlider by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showBookmarksSheet by remember { mutableStateOf(false) }
@@ -225,6 +277,21 @@ fun PdfViewerScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    // Details sheet for the open document (library documents only). The Open
+    // action is hidden — the document is already open. A successful file rename
+    // swaps this screen to the new URI at the current page.
+    // @spec LIB-REN-007, LIB-REN-008
+    val libraryDocument by viewModel.libraryDocument.collectAsState()
+    com.lumen.app.ui.library.LibraryDocumentSheetHost(
+        viewModel = libraryViewModel,
+        onOpenDocument = { _, _, _ -> },
+        snackbarHostState = snackbarHostState,
+        showOpenAction = false,
+        onFileRenamed = { newUri, newFilename ->
+            onRenamed(newUri, newFilename, viewModel.lastViewedPage.coerceAtLeast(0))
+        },
+    )
+
     // "Save a copy" — the reader picks a destination via the system file picker;
     // the PDF bytes are streamed there directly, never through app storage.
     val saveCopyLauncher = rememberLauncherForActivityResult(
@@ -247,11 +314,121 @@ fun PdfViewerScreen(
         }
     }
 
+    // ── External-access offer plumbing ────────────────────────────────────────
+    // The three escape hatches for an external document whose access would
+    // otherwise die with the next VIEW intent. Pickers pre-aim via
+    // EXTRA_INITIAL_URI targets built from the document id (LIB-EXT-013).
+
+    // "Make this PDF permanent" guided sheet (Downloads root, API 30+ only).
+    var showLumenPdfsSheet by remember(uri) { mutableStateOf(false) }
+    // null = creating, true = ready, false = failed.
+    var lumenPdfsFolderReady by remember(uri) { mutableStateOf<Boolean?>(null) }
+
+    // ADD_FOLDER: the standard add-folder flow (persists grants + enqueues the
+    // index pass), then the ViewModel promotes/clears when the grant covers
+    // the current document.
+    // @spec VIEW-EXT-005
+    val addFolderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { tree ->
+        if (tree != null) {
+            scope.launch {
+                libraryViewModel.addFolderAndWait(tree)
+                viewModel.onExternalFolderAdded()
+                snackbarHostState.showSnackbar("Folder added — Lumen is indexing it")
+            }
+        }
+    }
+
+    // Lumen-pdfs flow, step 3: same add-folder flow, picker pre-aimed at
+    // Download/Lumen-pdfs; the enqueued index pass makes the move feel instant.
+    // @spec VIEW-EXT-007
+    val lumenPdfsTreeLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { tree ->
+        if (tree != null) {
+            showLumenPdfsSheet = false
+            scope.launch {
+                libraryViewModel.addFolderAndWait(tree)
+                viewModel.onExternalFolderAdded()
+                snackbarHostState.showSnackbar("Lumen-pdfs added — indexing now")
+            }
+        }
+    }
+
+    // KEEP_FILE: single-file re-pick, pre-aimed at the containing folder when
+    // one is derivable. The contract is remembered per document URI, and the
+    // banner's document URI is captured at LAUNCH time — a document swap while
+    // the picker is up must not misclassify the pick against the new document.
+    // @spec VIEW-EXT-006
+    var keepAccessOriginal by rememberSaveable(uri) { mutableStateOf<String?>(null) }
+    val keepFileContract = remember(uri) {
+        object : ActivityResultContracts.OpenDocument() {
+            override fun createIntent(context: Context, input: Array<String>): Intent =
+                super.createIntent(context, input).apply {
+                    ExternalAccessPickerTargets.containingFolderInitialUri(uri)?.let { aim ->
+                        putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(aim))
+                    }
+                }
+        }
+    }
+    val keepFileLauncher = rememberLauncherForActivityResult(keepFileContract) { picked ->
+        val original = keepAccessOriginal
+        keepAccessOriginal = null
+        if (picked != null && original != null) {
+            viewModel.onKeepAccessPicked(original, picked)
+        }
+    }
+
+    // Keep-access outcomes: confirmation, distinct failure messages, and the
+    // nav-entry replacement when the pick landed on a different URI (the same
+    // replace pattern a file rename uses — the old URI's stores were re-keyed).
+    // @spec VIEW-EXT-006
+    LaunchedEffect(Unit) {
+        viewModel.keepAccessEvents.collect { event ->
+            when (val result = event.result) {
+                is KeepExternalAccessUseCase.Result.Kept ->
+                    snackbarHostState.showSnackbar("Lumen will keep access to this PDF")
+                is KeepExternalAccessUseCase.Result.Rekeyed ->
+                    onRenamed(
+                        result.newUri,
+                        event.newDisplayName ?: filename,
+                        viewModel.lastViewedPage.coerceAtLeast(0),
+                    )
+                is KeepExternalAccessUseCase.Result.DifferentDocument ->
+                    onRenamed(result.newUri, event.newDisplayName ?: "PDF", 0)
+                is KeepExternalAccessUseCase.Result.Failed ->
+                    snackbarHostState.showSnackbar(result.message)
+            }
+        }
+    }
+
+    // Lumen-pdfs flow, step 1: ensure Download/Lumen-pdfs exists the moment the
+    // sheet opens. Never moves or copies any PDF — it only creates the empty
+    // destination; the user performs the move in their own file manager.
+    // @spec LIB-EXT-011, VIEW-EXT-007
+    LaunchedEffect(showLumenPdfsSheet) {
+        if (showLumenPdfsSheet && lumenPdfsFolderReady != true) {
+            lumenPdfsFolderReady = null
+            lumenPdfsFolderReady = withContext(Dispatchers.IO) {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    runCatching { LumenPdfsFolder.ensureExists(context) }.getOrDefault(false)
+                } else {
+                    false // flow is never offered below API 30
+                }
+            }
+        }
+    }
+
     // The query whose occurrences drive the overlay: the in-document search text
     // while the bar is open, otherwise the last committed query.
     val effectiveQuery = (if (isViewerSearchActive) viewerSearchText else committedQuery).trim()
     val viewerSearchQuery = viewerSearchText.trim()
-    val isLoaded = documentState is PdfViewerViewModel.DocumentState.Loaded
+    // Loaded FOR THIS URI: during a singleTop swap the old document's Loaded
+    // state is still current for a frame and must not gate the new document's
+    // resume/search effects open.
+    val isLoaded =
+        (documentState as? PdfViewerViewModel.DocumentState.Loaded)?.uri == uri
     val viewerChromeColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.96f)
     val statusBarScrimColor = MaterialTheme.colorScheme.surfaceVariant
     val canvasBackground = MaterialTheme.colorScheme.surfaceVariant.toArgb()
@@ -276,9 +453,16 @@ fun PdfViewerScreen(
     }
 
     // ── Open the document on first composition / when password changes ───────
-    LaunchedEffect(uri, activePdfPassword) {
+    // passwordAttempt keys the effect so resubmitting an identical password
+    // still retries instead of silently doing nothing. deliveryId keys it so a
+    // singleTop REDELIVERY of the same external document re-attempts the open
+    // with the fresh grant it carries — without it, a viewer stuck on the
+    // expired screen ignores the very reopen the screen asks for (the VM's
+    // no-op guard keeps an already-Loaded document from reloading).
+    // @spec VIEW-LOCK-001, VIEW-EXT-010
+    LaunchedEffect(uri, activePdfPassword, passwordAttempt, deliveryId) {
         if (!parsedUriIsValid) return@LaunchedEffect
-        viewModel.openDocument(uri, activePdfPassword)
+        viewModel.openDocument(uri, activePdfPassword, displayName = filename)
     }
 
     // ── React to VM state transitions ─────────────────────────────────────────
@@ -300,6 +484,10 @@ fun PdfViewerScreen(
 
     // Status-bar contrast — keep the icon contrast aligned with the app theme.
     if (activity != null) {
+        // Captured during composition, before the SideEffect below paints the
+        // opaque scrim color over it, so leaving the viewer restores the host
+        // screens' status bar instead of leaking the scrim everywhere.
+        val previousStatusBarColor = remember { activity.window.statusBarColor }
         SideEffect {
             val window = activity.window
             window.statusBarColor = statusBarColor
@@ -311,6 +499,14 @@ fun PdfViewerScreen(
                 val lp = window.attributes
                 lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 window.attributes = lp
+                // A viewer entry replaced in place (the LIB-REN-008 rename swap)
+                // composes under the previous viewer's scrim, so the captured
+                // color can itself be the scrim — restoring it would leak the
+                // scrim onto every later screen; fall back to the edge-to-edge
+                // default instead.
+                window.statusBarColor =
+                    if (previousStatusBarColor == statusBarColor) android.graphics.Color.TRANSPARENT
+                    else previousStatusBarColor
                 WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !isDarkTheme
             }
         }
@@ -347,7 +543,9 @@ fun PdfViewerScreen(
     LaunchedEffect(uri, isLoaded) {
         if (!isLoaded || resumePromptShown) return@LaunchedEffect
         val lastPage = viewModel.resumePage?.takeIf { it >= 0 } ?: return@LaunchedEffect
-        if (lastPage != pageNumber) {
+        // Also compare against initialPage: restoring after process death already
+        // opens at the saved page, so offering to "resume" there is noise.
+        if (lastPage != pageNumber && lastPage != initialPage) {
             resumePromptShown = true
             val result = snackbarHostState.showSnackbar(
                 message = "Resume from p. ${lastPage + 1}",
@@ -363,9 +561,13 @@ fun PdfViewerScreen(
     // Debounced occurrence enumeration. The first run (the keyword the viewer was
     // opened with) carries the tapped page + occurrence so it opens on the exact
     // match; later runs (typing in the search bar) start at the first match.
-    LaunchedEffect(effectiveQuery, activePdfPassword, isLoaded) {
+    LaunchedEffect(uri, effectiveQuery, activePdfPassword, isLoaded) {
         if (!isLoaded) return@LaunchedEffect
         delay(180)
+        // Any query other than the restored one is user-driven — its jumps must
+        // never be swallowed, even if the restored search itself found nothing.
+        // @spec VIEW-SESS-001
+        if (effectiveQuery != restoredQuery) suppressRestoredSearchJump = false
         if (effectiveQuery.length < 2) {
             viewModel.clearSearch()
             return@LaunchedEffect
@@ -405,9 +607,17 @@ fun PdfViewerScreen(
 
     // Bring a match's page into view on explicit search actions only. Event-based:
     // keying on activePage state re-jumped the view on every recomposition-restart
-    // (e.g. rotation), losing the reader's position.
-    LaunchedEffect(Unit) {
+    // (e.g. rotation), losing the reader's position. Keyed on uri so the collector
+    // always holds the current document's suppression flag.
+    LaunchedEffect(uri) {
         viewModel.scrollToPage.collect { page ->
+            if (suppressRestoredSearchJump) {
+                // The one navigation the restored search fires after process
+                // death; highlights and counts still rebuild.
+                // @spec VIEW-SESS-001
+                suppressRestoredSearchJump = false
+                return@collect
+            }
             pdfDocView.value?.jumpToPage(page, animate = true)
         }
     }
@@ -442,11 +652,22 @@ fun PdfViewerScreen(
         pdfDocView.value?.setScrollHorizontal(scrollHorizontal)
     }
 
-    // Sync renderer → view when the document loads / changes
+    // Activating in-document search clears any active text selection — both
+    // overlays compete for the same page real estate and the same amber/green
+    // visual channel.
+    // @spec VIEW-SEL-006
+    LaunchedEffect(isViewerSearchActive) {
+        if (isViewerSearchActive) pdfDocView.value?.clearTextSelection()
+    }
+
+    // Sync renderer → view when the document loads / changes. The uri check
+    // matters during a singleTop swap: the old document's Loaded state is still
+    // current for a frame and must not be wired to the new document's view.
     LaunchedEffect(documentState) {
         val v = pdfDocView.value ?: return@LaunchedEffect
         when (val state = documentState) {
             is PdfViewerViewModel.DocumentState.Loaded -> {
+                if (state.uri != uri) return@LaunchedEffect
                 v.setRenderer(state.renderer, initialPage)
                 v.wordProvider = { page -> viewModel.wordsForPage(page) }
                 v.setScrollHorizontal(scrollHorizontal)
@@ -488,7 +709,11 @@ fun PdfViewerScreen(
             confirmButton = {
                 TextButton(onClick = {
                     activePdfPassword = passwordInput.ifBlank { null }
-                    showPasswordPrompt = false
+                    // Every tap retries, even with an identical password; the
+                    // dialog stays up so a rejection surfaces its error line
+                    // right here (Loaded closes it).
+                    // @spec VIEW-LOCK-001
+                    passwordAttempt++
                 }) { Text("Open") }
             },
             dismissButton = {
@@ -570,6 +795,31 @@ fun PdfViewerScreen(
         )
     }
 
+    if (showLumenPdfsSheet) {
+        LumenPdfsFlowSheet(
+            filename = filename.ifBlank { "this PDF" },
+            sourceFolder = remember(uri) {
+                com.lumen.app.data.fs.DocumentLocations.folderDisplayPath(uri)
+            },
+            folderReady = lumenPdfsFolderReady,
+            onShowFileLocation = {
+                openFolderForDocument(context, uri) {
+                    scope.launch { snackbarHostState.showSnackbar("No app can open this folder") }
+                }
+            },
+            onAddLumenPdfs = {
+                runCatching {
+                    lumenPdfsTreeLauncher.launch(
+                        Uri.parse(ExternalAccessPickerTargets.lumenPdfsInitialUri())
+                    )
+                }.onFailure {
+                    scope.launch { snackbarHostState.showSnackbar("Couldn't open the folder picker") }
+                }
+            },
+            onDismiss = { showLumenPdfsSheet = false },
+        )
+    }
+
     // ── Main layout ───────────────────────────────────────────────────────────
     Box(
         modifier = Modifier
@@ -591,10 +841,34 @@ fun PdfViewerScreen(
                 val state = documentState
                 if (state is PdfViewerViewModel.DocumentState.Failed) {
                     val canRetry = state.message.contains("too much memory", ignoreCase = true)
+                    // An expired external doc gets its escape hatch right on the
+                    // failure screen — the same keep-file picker the banner
+                    // offers, not a dead-end message.
+                    // @spec VIEW-EXT-009
+                    // The recovery action ships with the offer surface (v1.2:
+                    // off) — the honest message stays either way.
+                    // @spec LIB-EXT-021
+                    val accessExpired = state.message == MSG_EXTERNAL_ACCESS_EXPIRED &&
+                        com.lumen.app.domain.model.ExternalAccessFeature.OFFERS_ENABLED
                     PdfErrorScreen(
                         message = state.message,
                         onBack = onBack,
-                        onRetry = if (canRetry) { { viewModel.retry() } } else null,
+                        onRetry = when {
+                            accessExpired -> {
+                                {
+                                    keepAccessOriginal = uri
+                                    runCatching { keepFileLauncher.launch(arrayOf("application/pdf")) }
+                                        .onFailure {
+                                            keepAccessOriginal = null
+                                            scope.launch { snackbarHostState.showSnackbar("Couldn't open the file picker") }
+                                        }
+                                    Unit
+                                }
+                            }
+                            canRetry -> { { viewModel.retry() } }
+                            else -> null
+                        },
+                        retryLabel = if (accessExpired) "Keep access to this file" else "Try again",
                     )
                 } else if (isLocked) {
                     PdfErrorScreen(
@@ -603,63 +877,73 @@ fun PdfViewerScreen(
                         onRetry = { showPasswordPrompt = true },
                     )
                 } else {
-                    AndroidView(
-                        factory = { ctx ->
-                            PdfDocumentView(ctx).also { v ->
-                                pdfDocView.value = v
-                                v.setListener(object : PdfDocumentView.Listener {
-                                    override fun onPageChanged(currentPage: Int, totalPages: Int) {
-                                        displayPage.intValue = currentPage
-                                        pageCount.intValue = totalPages
-                                        viewModel.noteCurrentPage(uri, currentPage)
-                                    }
-                                    override fun onSingleTap() {
-                                        showControls = !showControls
-                                        if (!showControls) {
-                                            showBrightnessSlider = false
-                                            // Hiding chrome keeps the current query's
-                                            // highlights alive — only X/toggle dismisses.
-                                            if (isViewerSearchActive) {
-                                                committedQuery = viewerSearchText
-                                                isViewerSearchActive = false
+                    // key(uri): a singleTop document swap must rebuild the view and
+                    // its listener — both capture per-document state objects (and
+                    // the URI reading progress is saved under), which are re-created
+                    // for the new document.
+                    // @spec VIEW-SESS-002
+                    key(uri) {
+                        AndroidView(
+                            factory = { ctx ->
+                                PdfDocumentView(ctx).also { v ->
+                                    pdfDocView.value = v
+                                    v.setListener(object : PdfDocumentView.Listener {
+                                        override fun onPageChanged(currentPage: Int, totalPages: Int) {
+                                            displayPage.intValue = currentPage
+                                            pageCount.intValue = totalPages
+                                            savedViewedPage = currentPage
+                                            viewModel.noteCurrentPage(uri, currentPage)
+                                        }
+                                        override fun onSingleTap() {
+                                            showControls = !showControls
+                                            if (!showControls) {
+                                                showBrightnessSlider = false
+                                                // Hiding chrome keeps the current query's
+                                                // highlights alive — only X/toggle dismisses.
+                                                if (isViewerSearchActive) {
+                                                    committedQuery = viewerSearchText
+                                                    isViewerSearchActive = false
+                                                }
+                                            }
+                                            controlsTouchTick++
+                                        }
+                                        override fun onExternalLinkTap(uri: String) {
+                                            handleExternalLink(ctx, uri) {
+                                                showControls = true
+                                                controlsTouchTick++
                                             }
                                         }
-                                        controlsTouchTick++
-                                    }
-                                    override fun onExternalLinkTap(uri: String) {
-                                        handleExternalLink(ctx, uri) {
+                                        override fun onInternalLinkTap(pageIndex: Int) {
+                                            v.jumpToPage(pageIndex, animate = true)
+                                        }
+                                        // Zoom activity counts as interaction: show the
+                                        // controls (with the pill's readout) and restart
+                                        // the auto-hide timer.
+                                        // @spec VIEW-PILL-002
+                                        override fun onZoomChanged(zoom: Float) {
+                                            zoomPercent = (zoom * 100).roundToInt().coerceAtLeast(1)
                                             showControls = true
                                             controlsTouchTick++
                                         }
+                                        override fun onScrollActivityChanged(active: Boolean) {
+                                            scrollActivity = active
+                                        }
+                                    })
+                                    v.setCanvasColors(canvasBackground, canvasDivider)
+                                    if (state is PdfViewerViewModel.DocumentState.Loaded &&
+                                        state.uri == uri
+                                    ) {
+                                        v.setRenderer(state.renderer, initialPage)
+                                        v.wordProvider = { page -> viewModel.wordsForPage(page) }
+                                        v.setScrollHorizontal(scrollHorizontal)
+                                        pageCount.intValue = state.renderer.pageCount
                                     }
-                                    override fun onInternalLinkTap(pageIndex: Int) {
-                                        v.jumpToPage(pageIndex, animate = true)
-                                    }
-                                    // Zoom activity counts as interaction: show the
-                                    // controls (with the pill's readout) and restart
-                                    // the auto-hide timer.
-                                    // @spec VIEW-PILL-002
-                                    override fun onZoomChanged(zoom: Float) {
-                                        zoomPercent = (zoom * 100).roundToInt().coerceAtLeast(1)
-                                        showControls = true
-                                        controlsTouchTick++
-                                    }
-                                    override fun onScrollActivityChanged(active: Boolean) {
-                                        scrollActivity = active
-                                    }
-                                })
-                                v.setCanvasColors(canvasBackground, canvasDivider)
-                                if (state is PdfViewerViewModel.DocumentState.Loaded) {
-                                    v.setRenderer(state.renderer, initialPage)
-                                    v.wordProvider = { page -> viewModel.wordsForPage(page) }
-                                    v.setScrollHorizontal(scrollHorizontal)
-                                    pageCount.intValue = state.renderer.pageCount
                                 }
-                            }
-                        },
-                        update = { v -> v.setCanvasColors(canvasBackground, canvasDivider) },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                            },
+                            update = { v -> v.setCanvasColors(canvasBackground, canvasDivider) },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
             }
 
@@ -747,6 +1031,40 @@ fun PdfViewerScreen(
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 90.dp),
             )
+
+            // Make-permanent offer: one quiet, dismissible line under the top
+            // chrome, only for the current external document while an offer
+            // applies. Dismissal persists — the offer never nags.
+            // @spec VIEW-EXT-003, VIEW-EXT-004
+            val access = externalAccess
+            if (access != null && access.docUri == uri &&
+                access.offer != ExternalAccessOffer.NONE && isLoaded
+            ) {
+                ExternalAccessBanner(
+                    offer = access.offer,
+                    onAddFolder = {
+                        runCatching {
+                            addFolderLauncher.launch(
+                                ExternalAccessPickerTargets.containingFolderInitialUri(uri)
+                                    ?.let { Uri.parse(it) }
+                            )
+                        }.onFailure {
+                            scope.launch { snackbarHostState.showSnackbar("Couldn't open the folder picker") }
+                        }
+                    },
+                    onKeepFile = {
+                        keepAccessOriginal = access.docUri
+                        runCatching { keepFileLauncher.launch(arrayOf("application/pdf")) }
+                            .onFailure {
+                                keepAccessOriginal = null
+                                scope.launch { snackbarHostState.showSnackbar("Couldn't open the file picker") }
+                            }
+                    },
+                    onMakePermanent = { showLumenPdfsSheet = true },
+                    onDismiss = { viewModel.dismissExternalOffer() },
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
+            }
         }
 
         // Status-bar scrim — keep the status-bar zone opaque so the PDF doesn't
@@ -882,6 +1200,21 @@ fun PdfViewerScreen(
                                             }
                                     },
                                 )
+                                if (libraryDocument != null) {
+                                    // Opens the shared document detail sheet
+                                    // (rename lives there). External VIEW-intent
+                                    // opens have no library row and no Details.
+                                    // @spec LIB-REN-007
+                                    DropdownMenuItem(
+                                        text = { Text("Details") },
+                                        leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            controlsTouchTick++
+                                            libraryDocument?.let { libraryViewModel.showDocumentDetail(it) }
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("Go to page") },
                                     leadingIcon = { Icon(Icons.Default.Pin, contentDescription = null) },
@@ -1294,6 +1627,7 @@ private fun PdfErrorScreen(
     message: String,
     onBack: () -> Unit,
     onRetry: (() -> Unit)? = null,
+    retryLabel: String = "Try again",
 ) {
     Column(
         modifier = Modifier
@@ -1311,7 +1645,7 @@ private fun PdfErrorScreen(
         Spacer(Modifier.height(28.dp))
         if (onRetry != null) {
             Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
-                Text("Try again")
+                Text(retryLabel)
             }
             Spacer(Modifier.height(10.dp))
         }
@@ -1319,4 +1653,219 @@ private fun PdfErrorScreen(
             Text("Go back")
         }
     }
+}
+
+/**
+ * The make-permanent offer: one line of honesty about transient access plus
+ * the escape hatch(es) the decision matrix picked, in the same floating-card
+ * idiom as the zoom pill. LUMEN_PDFS_FLOW keeps the single-file re-pick
+ * offered alongside as the lighter option.
+ */
+// @spec VIEW-EXT-003, VIEW-EXT-007
+@Composable
+private fun ExternalAccessBanner(
+    offer: ExternalAccessOffer,
+    onAddFolder: () -> Unit,
+    onKeepFile: () -> Unit,
+    onMakePermanent: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shadowElevation = 4.dp,
+    ) {
+        Column(modifier = Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Lumen may lose access to this PDF after you close it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Dismiss this offer",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                when (offer) {
+                    ExternalAccessOffer.ADD_FOLDER ->
+                        TextButton(onClick = onAddFolder) { Text("Add its folder to Lumen") }
+                    ExternalAccessOffer.KEEP_FILE ->
+                        TextButton(onClick = onKeepFile) { Text("Keep access to this file") }
+                    ExternalAccessOffer.LUMEN_PDFS_FLOW -> {
+                        TextButton(onClick = onKeepFile) { Text("Keep access") }
+                        TextButton(onClick = onMakePermanent) { Text("Make permanent") }
+                    }
+                    ExternalAccessOffer.NONE -> Unit
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Guided "Make this PDF permanent" sheet (Downloads root, API 30+): the
+ * Download root itself is ungrantable, so the user moves the file — with their
+ * own file manager, Lumen never copies or moves anything — into a grantable
+ * `Download/Lumen-pdfs` folder and adds that to the library.
+ */
+// @spec VIEW-EXT-007
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LumenPdfsFlowSheet(
+    filename: String,
+    sourceFolder: String?,
+    folderReady: Boolean?,
+    onShowFileLocation: () -> Unit,
+    onAddLumenPdfs: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            Text(
+                "Make this PDF permanent",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Lumen never moves or copies your files. Move this PDF once and Lumen will keep it indexed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+            LumenPdfsStepRow(
+                number = "1",
+                text = "Create the folder Download/${LumenPdfsFolder.FOLDER_NAME}",
+            ) {
+                Text(
+                    text = when (folderReady) {
+                        null -> "Creating…"
+                        true -> "Ready"
+                        false -> "Couldn't create it"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (folderReady == false) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                )
+            }
+            if (folderReady == false) {
+                Text(
+                    "You can create \"${LumenPdfsFolder.FOLDER_NAME}\" inside Download yourself in your file manager, then continue.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 32.dp, top = 2.dp),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            LumenPdfsStepRow(
+                number = "2",
+                text = "Move this PDF into ${LumenPdfsFolder.FOLDER_NAME} with your file manager",
+            ) {
+                TextButton(onClick = onShowFileLocation) { Text("Show file location") }
+            }
+            // The folder jump is best-effort — some file managers open wherever
+            // they please — so the name and place to look for are always spelled
+            // out; the user can navigate there by hand regardless.
+            // @spec VIEW-EXT-008
+            Text(
+                text = if (sourceFolder != null) {
+                    "Look for “$filename” in $sourceFolder."
+                } else {
+                    "Look for “$filename”."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 32.dp, top = 2.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+            LumenPdfsStepRow(
+                number = "3",
+                text = "Add ${LumenPdfsFolder.FOLDER_NAME} to your library",
+            ) {
+                TextButton(onClick = onAddLumenPdfs) { Text("Add to library") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LumenPdfsStepRow(
+    number: String,
+    text: String,
+    trailing: @Composable () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+            shape = RoundedCornerShape(percent = 50),
+        ) {
+            Text(
+                number,
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        trailing()
+    }
+}
+
+/**
+ * Best-effort jump to the document's own folder in the system Files app for
+ * the guided flow's move step — the same directory-typed VIEW intent shape
+ * the library's Location row uses; where nothing handles it, the step text
+ * still tells the user where to go.
+ */
+// @spec VIEW-EXT-007
+private fun openFolderForDocument(
+    context: android.content.Context,
+    docUri: String,
+    onError: () -> Unit,
+) {
+    // Volume-correct: the document's own containing folder — an SD-card
+    // Download file must not open internal storage's Download — falling back
+    // to the primary Download directory when none is derivable.
+    val folderUri = runCatching {
+        Uri.parse(
+            ExternalAccessPickerTargets.containingFolderInitialUri(docUri)
+                ?: ExternalAccessPickerTargets.downloadsInitialUri()
+        )
+    }.getOrNull()
+    if (folderUri == null) {
+        onError()
+        return
+    }
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(folderUri, DocumentsContract.Document.MIME_TYPE_DIR)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching { context.startActivity(intent) }.onFailure { onError() }
 }

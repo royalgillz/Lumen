@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static-shortcut icon: white magnifier glyph on the brand green disc,
+     matching the launcher glyph's stroke style. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="@color/lumen_forest_green"
+        android:pathData="M24,24m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0" />
+    <path
+        android:strokeColor="@color/lumen_warm_white"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.2"
+        android:pathData="M21.5,21.5m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0"
+        android:fillColor="#00000000" />
+    <path
+        android:strokeColor="@color/lumen_warm_white"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.2"
+        android:pathData="M27.5,27.5 L34.5,34.5"
+        android:fillColor="#00000000" />
+</vector>

@@ -4,18 +4,17 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.entity.DocumentEntity
-import com.lumen.app.domain.model.DocumentTitles
 import com.lumen.app.ui.library.IndexHealthCard
-import com.lumen.app.ui.library.RenameDocumentDialog
+import com.lumen.app.ui.library.RenameDocumentDialogHost
 import com.lumen.app.ui.library.LibraryDocumentSheetHost
 import com.lumen.app.ui.library.LibraryEmptyState
 import com.lumen.app.ui.library.LibraryViewModel
@@ -49,10 +48,14 @@ fun DocumentsScreen(
     val sortOrder by libraryViewModel.sortOrder.collectAsState()
     val bookmarkCounts by libraryViewModel.bookmarkCounts.collectAsState()
     val customTitles by libraryViewModel.customTitles.collectAsState()
+    val lastPages by libraryViewModel.lastPages.collectAsState()
     val lostPermissionFolders by libraryViewModel.lostPermissionFolders.collectAsState()
     var gridMode by rememberSaveable { mutableStateOf(true) }
     var bookmarkedOnly by rememberSaveable { mutableStateOf(false) }
-    var renameTarget by remember { mutableStateOf<DocumentEntity?>(null) }
+    // URI, not entity: survives rotation (rememberSaveable) and re-resolves
+    // against the live list so a vanished document simply closes the dialog.
+    // @spec LIB-TTL-010
+    var renameTargetUri by rememberSaveable { mutableStateOf<String?>(null) }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -60,23 +63,33 @@ fun DocumentsScreen(
         uri?.let { libraryViewModel.addFolder(it) }
     }
 
-    LibraryDocumentSheetHost(viewModel = libraryViewModel, onOpenDocument = onOpenDocument)
+    LibraryDocumentSheetHost(
+        viewModel = libraryViewModel,
+        onOpenDocument = onOpenDocument,
+        onRenameSucceeded = { renameTargetUri = null },
+    )
 
-    renameTarget?.let { doc ->
-        RenameDocumentDialog(
-            currentTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
-            hasCustomTitle = customTitles.containsKey(doc.uri),
-            onSave = { newTitle ->
-                libraryViewModel.renameDocument(doc.uri, newTitle)
-                renameTarget = null
-            },
-            onDismiss = { renameTarget = null },
+    // Loaded-list resolution: a target that vanished from the list (deleted,
+    // or re-keyed by a completed rename) closes the dialog and clears the
+    // saved state; a still-loading list (null) decides nothing yet.
+    LaunchedEffect(documentsOrNull, renameTargetUri) {
+        val loaded = documentsOrNull ?: return@LaunchedEffect
+        if (renameTargetUri != null && loaded.none { it.uri == renameTargetUri }) {
+            renameTargetUri = null
+        }
+    }
+
+    renameTargetUri?.let { uri -> documents.firstOrNull { it.uri == uri } }?.let { doc ->
+        RenameDocumentDialogHost(
+            doc = doc,
+            viewModel = libraryViewModel,
+            onDismiss = { renameTargetUri = null },
         )
     }
 
     val libraryIdleContent: LazyListScope.() -> Unit = {
         if (isContentLoaded && folders.isEmpty() && documents.isEmpty()) {
-            item { LibraryEmptyState(onAdd = { folderPickerLauncher.launch(null) }) }
+            item { LibraryEmptyState(onPick = { folderPickerLauncher.launch(it) }) }
         } else if (isContentLoaded) {
             if (lostPermissionFolders.isNotEmpty()) {
                 item { LostAccessBanner(folderCount = lostPermissionFolders.size) }
@@ -103,6 +116,7 @@ fun DocumentsScreen(
                     visibleDocuments = visibleDocuments,
                     bookmarkCounts = bookmarkCounts,
                     customTitles = customTitles,
+                    lastPages = lastPages,
                     bookmarkedOnly = bookmarkedOnly,
                     gridMode = gridMode,
                     sortOrder = sortOrder,
@@ -110,7 +124,7 @@ fun DocumentsScreen(
                     onToggleGrid = { gridMode = !gridMode },
                     onSetSortOrder = { libraryViewModel.setSortOrder(it) },
                     onTapDocument = { doc: DocumentEntity -> libraryViewModel.showDocumentDetail(doc) },
-                    onLongPressDocument = { renameTarget = it },
+                    onLongPressDocument = { renameTargetUri = it.uri },
                     onRetryDocument = { libraryViewModel.retryDocument(it) },
                 )
             }
@@ -119,11 +133,14 @@ fun DocumentsScreen(
 
     SearchScreen(
         viewModel = searchViewModel,
+        libraryViewModel = libraryViewModel,
         onResultClick = onResultClick,
         // The idle view IS the library here — clearing the query "opens" it.
         // @spec NAV-005
         onOpenLibrary = { searchViewModel.query.value = "" },
         showNoIndexPrompt = false,
+        // This screen already hosts the detail sheet for this nav entry.
+        hostDocumentSheet = false,
         extraIdleContent = libraryIdleContent,
     )
 }

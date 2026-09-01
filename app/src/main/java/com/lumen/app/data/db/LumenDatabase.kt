@@ -7,11 +7,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lumen.app.data.db.dao.BookmarkDao
 import com.lumen.app.data.db.dao.DocumentDao
 import com.lumen.app.data.db.dao.DocumentTitleDao
+import com.lumen.app.data.db.dao.ExternalOpenDao
 import com.lumen.app.data.db.dao.PageDao
 import com.lumen.app.data.db.dao.PageTextDao
+import com.lumen.app.data.db.dao.RenameDao
 import com.lumen.app.data.db.entity.BookmarkEntity
 import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.data.db.entity.DocumentTitleEntity
+import com.lumen.app.data.db.entity.ExternalOpenEntity
 import com.lumen.app.data.db.entity.PageEntity
 import com.lumen.app.data.db.entity.PageTextEntity
 import com.lumen.app.data.db.entity.PageTextFtsEntity
@@ -25,8 +28,9 @@ import com.lumen.app.data.text.TextNormalizer
         PageTextFtsEntity::class,
         BookmarkEntity::class,
         DocumentTitleEntity::class,
+        ExternalOpenEntity::class,
     ],
-    version = 11,
+    version = 14,
     exportSchema = true
 )
 abstract class LumenDatabase : RoomDatabase() {
@@ -35,6 +39,8 @@ abstract class LumenDatabase : RoomDatabase() {
     abstract fun pageTextDao(): PageTextDao
     abstract fun bookmarkDao(): BookmarkDao
     abstract fun documentTitleDao(): DocumentTitleDao
+    abstract fun externalOpenDao(): ExternalOpenDao
+    abstract fun renameDao(): RenameDao
 
     companion object {
         val MIGRATION_3_4 = object : Migration(3, 4) {
@@ -123,6 +129,55 @@ abstract class LumenDatabase : RoomDatabase() {
                 database.execSQL(
                     "CREATE TABLE IF NOT EXISTS `document_titles` " +
                         "(`docUri` TEXT NOT NULL, `title` TEXT NOT NULL, PRIMARY KEY(`docUri`))"
+                )
+            }
+        }
+
+        // External-open recency: VIEW-intent opens with no library row. Outside
+        // `documents` so canonical counts never see it; purely additive.
+        // @spec LIB-REC-003
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `external_opens` (" +
+                        "`docUri` TEXT NOT NULL, " +
+                        "`displayName` TEXT NOT NULL, " +
+                        "`lastOpenedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`docUri`))"
+                )
+            }
+        }
+
+        // Embedded PDF metadata author. Nullable and additive — existing rows
+        // stay null until their next re-index writes the value.
+        // @spec LIB-TTL-011
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE documents ADD COLUMN author TEXT")
+            }
+        }
+
+        // External-access honesty + ephemeral indexing. external_opens learns
+        // whether a persistable grant is actually held (persisted), that a
+        // reopen died with the grant (accessLost — shown expired, not deleted),
+        // and that the make-permanent offer was dismissed (offerDismissed —
+        // offers appear once). documents gains the nullable rolling-TTL column
+        // ephemeralExpiresAt (null = permanent library doc). All additive with
+        // defaults matching prior behavior — existing rows are unaffected.
+        // @spec LIB-EXT-006
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE external_opens ADD COLUMN persisted INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL(
+                    "ALTER TABLE external_opens ADD COLUMN accessLost INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL(
+                    "ALTER TABLE external_opens ADD COLUMN offerDismissed INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL(
+                    "ALTER TABLE documents ADD COLUMN ephemeralExpiresAt INTEGER"
                 )
             }
         }

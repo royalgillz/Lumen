@@ -62,8 +62,14 @@ class PfdSeekableStream private constructor(
 
         @Throws(IOException::class)
         fun open(context: Context, uri: Uri): PfdSeekableStream {
+            // A null descriptor means the provider couldn't serve the document
+            // (gone, or the app it belongs to is unavailable) — that is access
+            // loss, and it must classify as such: FileNotFoundException is what
+            // isAccessLoss matches, so the expired-row handling and its
+            // recovery UI engage instead of a raw "Cannot open URI" string.
+            // @spec LIB-EXT-002
             val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-                ?: throw IOException("Cannot open URI: $uri")
+                ?: throw java.io.FileNotFoundException("Provider returned no descriptor for: $uri")
             val fis = FileInputStream(pfd.fileDescriptor)
             return PfdSeekableStream(pfd, fis)
         }

@@ -25,7 +25,7 @@ object SnippetBuilder {
         val words = wordRanges(original)
         if (words.isEmpty()) return Snippet("", emptyList())
 
-        val sorted = spans.sortedBy { it.first }
+        val sorted = mergeOverlapping(spans)
         var startWord: Int
         var endWord: Int
         if (sorted.isEmpty()) {
@@ -61,6 +61,26 @@ object SnippetBuilder {
             if (s <= e) (s + offset)..(e + offset) else null
         }
         return Snippet(text, highlights)
+    }
+
+    /** Sorts spans and merges overlapping/contained ones (a query token that is
+     *  a prefix of another matches the same word twice) so no character is
+     *  highlighted — and at render time re-emitted — more than once. Adjacent
+     *  but disjoint spans stay separate occurrences. */
+    // @spec SEARCH-SNIP-004
+    private fun mergeOverlapping(spans: List<IntRange>): List<IntRange> {
+        if (spans.size < 2) return spans
+        val sorted = spans.sortedWith(compareBy({ it.first }, { it.last }))
+        val merged = mutableListOf(sorted[0])
+        for (span in sorted.subList(1, sorted.size)) {
+            val last = merged.last()
+            if (span.first <= last.last) {
+                if (span.last > last.last) merged[merged.lastIndex] = last.first..span.last
+            } else {
+                merged.add(span)
+            }
+        }
+        return merged
     }
 
     /** Ranges of whitespace-delimited words. */

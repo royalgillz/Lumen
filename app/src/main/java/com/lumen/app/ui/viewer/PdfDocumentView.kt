@@ -5,11 +5,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentCallbacks2
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.AttributeSet
@@ -73,6 +75,9 @@ class PdfDocumentView @JvmOverloads constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var pageSizes: List<SizeF> = emptyList()
+    /** In-flight page-size load for the current renderer; cancelled on swap so a
+     *  stale load can't publish the old document's layout against the new one. */
+    private var pageSizesJob: Job? = null
     /** doc-space y-offset (vertical) or x-offset (horizontal) for the top-left of each page. */
     private var pageOffsets: FloatArray = FloatArray(0)
     private var docContentWidth = 0f
@@ -126,6 +131,22 @@ class PdfDocumentView @JvmOverloads constructor(
         }
     private val inFlightRenders = HashMap<CacheKey, Job>()
 
+    /**
+     * Sharp-region overlay for oversized pages (extreme-aspect exports whose
+     * whole-page bitmap the caps blur — see [OversizedPageMath]). One slot, not
+     * the LRU: region bitmaps are viewport-bounded and keyed by a moving region
+     * rect, so LRU keys would churn every pan; a single current entry (plus the
+     * soft whole-page bitmap beneath it as pan fallback) is the whole need.
+     * When several oversized pages are visible at once, the slot serves the
+     * first in draw order — the others stay at underlay sharpness until
+     * scrolled to. All slot mutation happens on the main thread.
+     */
+    private data class RegionSpec(val pageIndex: Int, val scale: Float, val region: PageRegion)
+    private var regionBitmap: Bitmap? = null
+    private var regionSpec: RegionSpec? = null
+    private var regionJob: Job? = null
+    private var regionJobSpec: RegionSpec? = null
+
     /** Per-page link lists, prefetched for visible pages so tap hit-testing is
      *  synchronous. Probing on tap had to wait on the document mutex behind any
      *  in-flight render, which made the controls toggle feel dead during heavy
@@ -133,25 +154,32 @@ class PdfDocumentView @JvmOverloads constructor(
     private val linkCache = HashMap<Int, List<MuPdfPageRenderer.LinkInfo>>()
     private val linkFetchesInFlight = HashSet<Int>()
 
-    // ── Word selection (long-press → word → floating copy menu, per Q4) ──────
+    // ── Text selection (long-press → word → drag handles → floating menu) ────
     /** Optional word source that can serve scanned/OCR pages (no text layer);
      *  when unset, selection falls back to the renderer's structured text. */
     var wordProvider: (suspend (Int) -> List<MuPdfPageRenderer.WordBox>)? = null
     private val wordCache = HashMap<Int, List<MuPdfPageRenderer.WordBox>>()
     private var selectionPage = -1
-    private var selectionRect: RectF? = null
-    private var selectionText: String? = null
+    /** Word-range math lives in the JVM-testable model; the view owns only the
+     *  gesture and draw wiring around it. */
+    private var selection: TextSelectionModel? = null
+    /** Which handle the finger holds mid-drag (null = no drag). The model can
+     *  swap the role mid-drag when a handle crosses its counterpart. */
+    private var draggingSelectionStart: Boolean? = null
     private var actionMode: ActionMode? = null
+    /** True while the floating menu is intentionally re-anchored (handle drag);
+     *  suppresses the destroy callback's selection clear. */
+    private var actionModeRestarting = false
     private val selectionPaint = Paint().apply {
         color = Color.argb(80, 0x2A, 0x4D, 0x3A) // translucent ForestGreen
         style = Paint.Style.FILL
     }
-    private val selectionStroke = Paint().apply {
-        color = Color.argb(220, 0x2A, 0x4D, 0x3A)
-        style = Paint.Style.STROKE
-        strokeWidth = context.resources.displayMetrics.density * 1.5f
+    private val selectionHandlePaint = Paint().apply {
+        color = Color.argb(235, 0x2A, 0x4D, 0x3A)
+        style = Paint.Style.FILL
         isAntiAlias = true
     }
+    private val handlePath = Path()
 
     /** One page's highlight rects, in page-pt coordinates. */
     data class PageHighlightSet(
@@ -273,6 +301,9 @@ class PdfDocumentView @JvmOverloads constructor(
     fun setRenderer(renderer: MuPdfPageRenderer?, initialPage: Int) {
         // Drop everything tied to the previous document.
         cancelAllRenders()
+        clearRegionState()
+        pageSizesJob?.cancel()
+        pageSizesJob = null
         bitmapCache.evictAll()
         flingJob?.let { removeCallbacks(it) }
         flingJob = null
@@ -303,7 +334,7 @@ class PdfDocumentView @JvmOverloads constructor(
         dismissSelection()
 
         if (renderer != null) {
-            scope.launch { loadPageSizes(renderer) }
+            pageSizesJob = scope.launch { loadPageSizes(renderer) }
         }
         invalidate()
     }
@@ -390,6 +421,10 @@ class PdfDocumentView @JvmOverloads constructor(
 
     fun jumpToPage(index: Int, animate: Boolean = true) {
         if (index !in 0 until pageCount) return
+        // Page navigation clears the selection; the same-page settle of the
+        // horizontal snap is not navigation and keeps it.
+        // @spec VIEW-SEL-006
+        if (selection != null && index != selectionPage) dismissSelection()
         if (pageSizes.isEmpty() || pageOffsets.isEmpty() || width == 0 || height == 0) {
             pendingInitialPage = index
             return
@@ -498,6 +533,7 @@ class PdfDocumentView @JvmOverloads constructor(
         scrollbarAnimator?.cancel()
         animator?.cancel()
         scope.cancel()
+        clearRegionState()
         bitmapCache.evictAll()
     }
 
@@ -511,6 +547,7 @@ class PdfDocumentView @JvmOverloads constructor(
         override fun onTrimMemory(level: Int) {
             when {
                 level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
+                    clearRegionState()
                     bitmapCache.evictAll()
                     invalidate()
                 }
@@ -526,6 +563,10 @@ class PdfDocumentView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Selection handles claim the touch before any pan/scroll gesture can;
+        // a drag starting off a handle behaves exactly as without a selection.
+        // @spec VIEW-SEL-004
+        if (handleSelectionHandleTouch(event)) return true
         // Fast-scroll thumb takes priority over pan/zoom when grabbed.
         if (handleThumbTouch(event)) return true
 
@@ -634,6 +675,10 @@ class PdfDocumentView @JvmOverloads constructor(
                     drawAnyAvailableBitmap(canvas, i, tmpRect)
                     schedulePageRender(i, scaleBucket, zoom)
                 }
+                // Oversized pages: overlay a sharp render of the visible region
+                // on top of the (capped, soft) whole-page bitmap.
+                // @spec VIEW-BIG-001
+                maybeDrawSharpRegion(canvas, i, docRect, scaleBucket)
                 drawHighlightsForPage(canvas, i, docRect)
                 if (i == selectionPage) drawSelection(canvas, docRect)
                 prefetchLinks(i)
@@ -649,6 +694,93 @@ class PdfDocumentView @JvmOverloads constructor(
             }
         }
         drawScrollbar(canvas)
+    }
+
+    /**
+     * Draw (and keep fresh) the sharp-region overlay for an oversized page.
+     * The slot's bitmap keeps drawing while stale — its dst rect derives from
+     * its own region, so a stale scale is only softer, never misplaced — and a
+     * replacement render is scheduled whenever the spec (page, quantised
+     * scale, coverage of the visible rect) has moved on.
+     */
+    // @spec VIEW-BIG-001
+    private fun maybeDrawSharpRegion(canvas: Canvas, pageIndex: Int, docRect: RectF, scaleBucket: Int) {
+        val sz = pageSizes.getOrNull(pageIndex) ?: return
+        val desired = fitScale * scaleBucketToZoom(scaleBucket)
+        if (!OversizedPageMath.isOversized(sz.width, sz.height, desired, MAX_DIM, maxBitmapBytes)) return
+
+        // Visible part of this page in page-local pt.
+        matrix.getValues(matrixValues)
+        val s = matrixValues[Matrix.MSCALE_X]
+        if (s <= 0f) return
+        val tx = matrixValues[Matrix.MTRANS_X]
+        val ty = matrixValues[Matrix.MTRANS_Y]
+        val visible = PageRegion(
+            left = (-tx / s - docRect.left).coerceIn(0f, sz.width),
+            top = (-ty / s - docRect.top).coerceIn(0f, sz.height),
+            right = ((-tx + width) / s - docRect.left).coerceIn(0f, sz.width),
+            bottom = ((-ty + height) / s - docRect.top).coerceIn(0f, sz.height),
+        )
+        if (visible.isEmpty) return
+
+        val drawn = regionSpec
+        val bmp = regionBitmap
+        var upToDate = false
+        if (drawn != null && drawn.pageIndex == pageIndex && bmp != null && !bmp.isRecycled &&
+            OversizedPageMath.covers(drawn.region, visible)
+        ) {
+            tmpRect.set(
+                docRect.left + drawn.region.left,
+                docRect.top + drawn.region.top,
+                docRect.left + drawn.region.right,
+                docRect.top + drawn.region.bottom,
+            )
+            matrix.mapRect(tmpRect)
+            canvas.drawBitmap(bmp, null, tmpRect, bitmapPaint)
+            upToDate = drawn.scale == desired
+        }
+        if (!upToDate) scheduleRegionRender(pageIndex, desired, visible)
+    }
+
+    private fun scheduleRegionRender(pageIndex: Int, scale: Float, visible: PageRegion) {
+        val r = renderer ?: return
+        val sz = pageSizes.getOrNull(pageIndex) ?: return
+        val inFlight = regionJobSpec
+        if (regionJob?.isActive == true && inFlight != null &&
+            inFlight.pageIndex == pageIndex && inFlight.scale == scale &&
+            OversizedPageMath.covers(inFlight.region, visible)
+        ) {
+            return
+        }
+        regionJob?.cancel()
+        val region = OversizedPageMath.regionForViewport(sz.width, sz.height, visible, scale, maxBitmapBytes)
+        if (region.isEmpty) return
+        val spec = RegionSpec(pageIndex, scale, region)
+        regionJobSpec = spec
+        regionJob = scope.launch(Dispatchers.Main.immediate) {
+            val bitmap = r.renderRegion(
+                spec.pageIndex, spec.scale,
+                spec.region.left, spec.region.top, spec.region.right, spec.region.bottom,
+            ) ?: return@launch
+            if (this@PdfDocumentView.renderer !== r) {
+                bitmap.recycle()
+                return@launch
+            }
+            regionBitmap?.recycle()
+            regionBitmap = bitmap
+            regionSpec = spec
+            invalidate()
+        }
+    }
+
+    /** Drop the sharp-region slot (document swap, teardown, memory pressure). */
+    private fun clearRegionState() {
+        regionJob?.cancel()
+        regionJob = null
+        regionJobSpec = null
+        regionBitmap?.recycle()
+        regionBitmap = null
+        regionSpec = null
     }
 
     private fun drawAnyAvailableBitmap(canvas: Canvas, pageIndex: Int, screenRect: RectF) {
@@ -698,6 +830,11 @@ class PdfDocumentView @JvmOverloads constructor(
             val size = renderer.pageSize(i) ?: SizeF(595f, 842f) // A4 fallback
             sizes.add(size)
         }
+        // Identity guard (like prefetchLinks / the word cache): a load that
+        // outraced its cancellation on swap must not leave the old document's
+        // sizes against the new document's pageCount — onDraw and jumpToPage
+        // would index past the shorter list.
+        if (this@PdfDocumentView.renderer !== renderer) return
         pageSizes = sizes
         relayoutPages()
         // The view may not have been laid out yet — onSizeChanged will position once
@@ -980,7 +1117,6 @@ class PdfDocumentView @JvmOverloads constructor(
 
     private inner class ScaleListener : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
-            if (selectionText != null) dismissSelection()
             val factor = detector.scaleFactor
             val current = currentZoom()
             val target = (current * factor).coerceIn(ZOOM_MIN, ZOOM_MAX)
@@ -989,6 +1125,10 @@ class PdfDocumentView @JvmOverloads constructor(
             clampMatrix()
             invalidate()
             maybeEmitZoomChange()
+            // Selection rects are page-space and transform with the matrix; only
+            // the floating menu needs re-anchoring.
+            // @spec VIEW-SEL-006
+            actionMode?.invalidateContentRect()
             return true
         }
 
@@ -1014,12 +1154,13 @@ class PdfDocumentView @JvmOverloads constructor(
             distanceX: Float,
             distanceY: Float,
         ): Boolean {
-            if (selectionText != null) dismissSelection()
             matrix.postTranslate(-distanceX, -distanceY)
             clampMatrix()
             invalidate()
             maybeEmitPageChange()
             pokeScrollbar()
+            // @spec VIEW-SEL-006
+            actionMode?.invalidateContentRect()
             return true
         }
 
@@ -1046,7 +1187,8 @@ class PdfDocumentView @JvmOverloads constructor(
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             // An active selection is dismissed by the first tap, nothing else.
-            if (selectionText != null) {
+            // @spec VIEW-SEL-006
+            if (selection != null) {
                 dismissSelection()
                 return true
             }
@@ -1083,8 +1225,9 @@ class PdfDocumentView @JvmOverloads constructor(
         }
     }
 
-    // ── Word selection ────────────────────────────────────────────────────────
+    // ── Text selection ────────────────────────────────────────────────────────
 
+    // @spec VIEW-SEL-001
     private fun handleLongPressSelection(screenX: Float, screenY: Float) {
         val r = renderer ?: return
         if (!matrix.invert(inverseMatrix)) return
@@ -1100,43 +1243,154 @@ class PdfDocumentView @JvmOverloads constructor(
                 ?: (wordProvider?.invoke(hitPage) ?: r.wordsForPage(hitPage)).also {
                     if (this@PdfDocumentView.renderer === r) wordCache[hitPage] = it
                 }
-            val slop = 2f
-            val hit = words.firstOrNull { w ->
-                px >= w.rect.left - slop && px <= w.rect.right + slop &&
-                    py >= w.rect.top - slop && py <= w.rect.bottom + slop
-            } ?: return@launch
+            // Identity guard (like prefetchLinks): a word load that outraced a
+            // document swap must not select against the new document's pages.
+            if (this@PdfDocumentView.renderer !== r) return@launch
+            if (words.isEmpty()) return@launch
+            val model = TextSelectionModel(
+                words.map { w ->
+                    TextSelectionModel.Word(
+                        w.text, w.rect.left, w.rect.top, w.rect.right, w.rect.bottom, w.line,
+                    )
+                },
+            )
+            if (!model.selectWordAt(px, py, slop = 2f)) return@launch
             selectionPage = hitPage
-            selectionRect = RectF(hit.rect)
-            selectionText = hit.text
+            selection = model
             performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             invalidate()
             startSelectionActionMode()
         }
     }
 
+    /**
+     * A touch starting on a selection handle drives the drag and never reaches
+     * the pan/zoom detectors; anywhere else the event flows through untouched.
+     * The drag point is mapped into the selection page's coordinates, so the
+     * selection can never leave its page. The drag latch is
+     * [draggingSelectionStart], deliberately independent of [selection]: an
+     * externally-triggered clear mid-drag (page jump, document swap, search
+     * activation) must not leak the rest of the touch stream to the gesture
+     * detectors, which would read the remaining MOVEs as a pan and jump the
+     * viewport — the latched stream is consumed until UP/CANCEL.
+     */
+    // @spec VIEW-SEL-002, VIEW-SEL-004, VIEW-SEL-007
+    private fun handleSelectionHandleTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (selection == null) return false
+                val hit = hitTestHandle(event.x, event.y) ?: return false
+                draggingSelectionStart = hit
+                parent?.requestDisallowInterceptTouchEvent(true)
+                scroller.forceFinished(true)
+                animator?.cancel()
+                // The floating menu would sit over the drag; re-anchored on release.
+                finishActionModeKeepingSelection()
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dragging = draggingSelectionStart ?: return false
+                // Selection cleared externally mid-drag: keep consuming the
+                // latched stream, just stop extending.
+                val model = selection ?: return true
+                val p = screenToSelectionPagePoint(event.x, event.y) ?: return true
+                val idx = model.indexNear(p[0], p[1])
+                if (idx >= 0) {
+                    draggingSelectionStart = model.dragHandle(dragging, idx)
+                    invalidate()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (draggingSelectionStart != null) {
+                    draggingSelectionStart = null
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    invalidate()
+                    if (selection != null) startSelectionActionMode()
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /** Which handle a screen point grabs (true = start), within a generous
+     *  touch radius around the teardrop body; null when neither. */
+    private fun hitTestHandle(x: Float, y: Float): Boolean? {
+        val slop = HANDLE_TOUCH_RADIUS_DP * density
+        val r = HANDLE_RADIUS_DP * density
+        var best: Boolean? = null
+        var bestDist = Float.MAX_VALUE
+        for (start in booleanArrayOf(true, false)) {
+            val a = handleAnchorScreen(start) ?: continue
+            val cx = a[0] + if (start) -r else r
+            val cy = a[1] + r
+            val dx = x - cx
+            val dy = y - cy
+            val d = dx * dx + dy * dy
+            if (d <= slop * slop && d < bestDist) {
+                bestDist = d
+                best = start
+            }
+        }
+        return best
+    }
+
+    /** Screen-space anchor of a handle: the outer bottom corner of the start /
+     *  end word, mapped through the page origin and the view matrix. */
+    private fun handleAnchorScreen(start: Boolean): FloatArray? {
+        val model = selection ?: return null
+        val w = (if (start) model.startWord() else model.endWord()) ?: return null
+        val pageSize = pageSizes.getOrNull(selectionPage) ?: return null
+        val docRect = docRectForPage(selectionPage, pageSize)
+        tmpPagePt[0] = docRect.left + if (start) w.left else w.right
+        tmpPagePt[1] = docRect.top + w.bottom
+        matrix.mapPoints(tmpPagePt)
+        return floatArrayOf(tmpPagePt[0], tmpPagePt[1])
+    }
+
+    /** Screen point → page-pt coordinates of the selection page (the result may
+     *  lie outside the page bounds; the model clamps in reading order). */
+    private fun screenToSelectionPagePoint(x: Float, y: Float): FloatArray? {
+        if (!matrix.invert(inverseMatrix)) return null
+        val pageSize = pageSizes.getOrNull(selectionPage) ?: return null
+        tmpPagePt[0] = x; tmpPagePt[1] = y
+        inverseMatrix.mapPoints(tmpPagePt)
+        val docRect = docRectForPage(selectionPage, pageSize)
+        return floatArrayOf(tmpPagePt[0] - docRect.left, tmpPagePt[1] - docRect.top)
+    }
+
     private fun startSelectionActionMode() {
-        actionMode?.finish()
+        finishActionModeKeepingSelection()
         actionMode = startActionMode(object : ActionMode.Callback2() {
             override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
                 menu.add(Menu.NONE, MENU_COPY, 0, android.R.string.copy)
+                menu.add(Menu.NONE, MENU_SHARE, 1, "Share")
                 return true
             }
 
             override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
 
+            // @spec VIEW-SEL-005
             override fun onActionItemClicked(mode: ActionMode, item: android.view.MenuItem): Boolean {
-                return if (item.itemId == MENU_COPY) {
-                    copySelection()
-                    mode.finish()
-                    true
-                } else {
-                    false
+                return when (item.itemId) {
+                    MENU_COPY -> {
+                        copySelection()
+                        mode.finish()
+                        true
+                    }
+                    MENU_SHARE -> {
+                        shareSelection()
+                        mode.finish()
+                        true
+                    }
+                    else -> false
                 }
             }
 
             override fun onDestroyActionMode(mode: ActionMode) {
                 actionMode = null
-                clearSelection()
+                if (!actionModeRestarting) clearSelection()
             }
 
             override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
@@ -1150,44 +1404,109 @@ class PdfDocumentView @JvmOverloads constructor(
         }, ActionMode.TYPE_FLOATING)
     }
 
+    /** Finish the floating menu without letting its destroy callback clear the
+     *  selection — used mid-drag and when re-anchoring. */
+    private fun finishActionModeKeepingSelection() {
+        val mode = actionMode ?: return
+        actionModeRestarting = true
+        try {
+            mode.finish()
+        } finally {
+            actionModeRestarting = false
+        }
+    }
+
     private fun selectionScreenRect(): RectF? {
-        val rect = selectionRect ?: return null
+        val model = selection ?: return null
+        val boxes = model.selectionBoxes()
+        if (boxes.isEmpty()) return null
         val pageSize = pageSizes.getOrNull(selectionPage) ?: return null
         val docRect = docRectForPage(selectionPage, pageSize)
-        val out = RectF(
-            docRect.left + rect.left,
-            docRect.top + rect.top,
-            docRect.left + rect.right,
-            docRect.top + rect.bottom,
-        )
-        matrix.mapRect(out)
+        var out: RectF? = null
+        for (b in boxes) {
+            val r = RectF(
+                docRect.left + b.left,
+                docRect.top + b.top,
+                docRect.left + b.right,
+                docRect.top + b.bottom,
+            )
+            matrix.mapRect(r)
+            if (out == null) out = r else out.union(r)
+        }
         return out
     }
 
+    // @spec VIEW-SEL-003
     private fun drawSelection(canvas: Canvas, docPageRect: RectF) {
-        val rect = selectionRect ?: return
-        tmpRect.set(
-            docPageRect.left + rect.left,
-            docPageRect.top + rect.top,
-            docPageRect.left + rect.right,
-            docPageRect.top + rect.bottom,
-        )
-        matrix.mapRect(tmpRect)
-        canvas.drawRect(tmpRect, selectionPaint)
-        canvas.drawRect(tmpRect, selectionStroke)
+        val model = selection ?: return
+        for (b in model.selectionBoxes()) {
+            tmpRect.set(
+                docPageRect.left + b.left,
+                docPageRect.top + b.top,
+                docPageRect.left + b.right,
+                docPageRect.top + b.bottom,
+            )
+            matrix.mapRect(tmpRect)
+            canvas.drawRect(tmpRect, selectionPaint)
+        }
+        drawSelectionHandle(canvas, docPageRect, start = true, model)
+        drawSelectionHandle(canvas, docPageRect, start = false, model)
     }
 
+    /** Material-style teardrop: a circle hanging below the word's bottom corner
+     *  plus the square quadrant joining it to the anchor point. The start handle
+     *  hangs down-left of the selection, the end handle down-right. */
+    private fun drawSelectionHandle(
+        canvas: Canvas,
+        docPageRect: RectF,
+        start: Boolean,
+        model: TextSelectionModel,
+    ) {
+        val w = (if (start) model.startWord() else model.endWord()) ?: return
+        tmpPagePt[0] = docPageRect.left + if (start) w.left else w.right
+        tmpPagePt[1] = docPageRect.top + w.bottom
+        matrix.mapPoints(tmpPagePt)
+        val ax = tmpPagePt[0]
+        val ay = tmpPagePt[1]
+        val r = HANDLE_RADIUS_DP * density
+        val cx = ax + if (start) -r else r
+        val cy = ay + r
+        handlePath.reset()
+        handlePath.addCircle(cx, cy, r, Path.Direction.CW)
+        if (start) {
+            handlePath.addRect(ax - r, ay, ax, ay + r, Path.Direction.CW)
+        } else {
+            handlePath.addRect(ax, ay, ax + r, ay + r, Path.Direction.CW)
+        }
+        canvas.drawPath(handlePath, selectionHandlePaint)
+    }
+
+    // @spec VIEW-SEL-005
     private fun copySelection() {
-        val text = selectionText ?: return
+        val text = selection?.selectedText()?.takeIf { it.isNotEmpty() } ?: return
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         cm.setPrimaryClip(ClipData.newPlainText("Lumen", text))
     }
 
+    // @spec VIEW-SEL-005
+    private fun shareSelection() {
+        val text = selection?.selectedText()?.takeIf { it.isNotEmpty() } ?: return
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        runCatching {
+            context.startActivity(
+                Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+    }
+
     private fun clearSelection() {
-        if (selectionPage < 0 && selectionRect == null) return
+        if (selectionPage < 0 && selection == null) return
         selectionPage = -1
-        selectionRect = null
-        selectionText = null
+        selection = null
+        draggingSelectionStart = null
         invalidate()
     }
 
@@ -1197,6 +1516,11 @@ class PdfDocumentView @JvmOverloads constructor(
         val mode = actionMode
         if (mode != null) mode.finish() else clearSelection()
     }
+
+    /** Host-driven clear — in-document search activation must not compete with
+     *  an active selection for the reader's attention. */
+    // @spec VIEW-SEL-006
+    fun clearTextSelection() = dismissSelection()
 
     private fun dispatchLinkHit(hit: MuPdfPageRenderer.LinkInfo?) {
         when {
@@ -1277,6 +1601,7 @@ class PdfDocumentView @JvmOverloads constructor(
                     clampMatrix()
                     invalidate()
                     maybeEmitPageChange()
+                    actionMode?.invalidateContentRect()
                     ViewCompat.postOnAnimation(this@PdfDocumentView, this)
                 } else {
                     flingJob = null
@@ -1307,6 +1632,7 @@ class PdfDocumentView @JvmOverloads constructor(
                 clampMatrix()
                 invalidate()
                 maybeEmitZoomChange()
+                actionMode?.invalidateContentRect()
             }
             start()
         }
@@ -1403,14 +1729,7 @@ class PdfDocumentView @JvmOverloads constructor(
      */
     private fun cappedRenderScale(pageIndex: Int, desired: Float): Float {
         val sz = pageSizes.getOrNull(pageIndex) ?: return desired
-        val wPt = sz.width
-        val hPt = sz.height
-        if (wPt <= 0f || hPt <= 0f) return desired
-        var s = desired
-        val maxByDim = min(MAX_DIM / wPt, MAX_DIM / hPt)
-        if (s > maxByDim) s = maxByDim
-        val maxByBytes = sqrt(maxBitmapBytes.toDouble() / (4.0 * wPt * hPt)).toFloat()
-        if (s > maxByBytes) s = maxByBytes
+        val s = OversizedPageMath.cappedScale(sz.width, sz.height, desired, MAX_DIM, maxBitmapBytes)
         return max(s, 0.1f)
     }
 
@@ -1491,5 +1810,11 @@ class PdfDocumentView @JvmOverloads constructor(
         private const val PAGE_ANNOUNCE_DEBOUNCE_MS = 600L
 
         private const val MENU_COPY = 1
+        private const val MENU_SHARE = 2
+
+        // Selection drag handles
+        private const val HANDLE_RADIUS_DP = 9f
+        /** Generous grab radius around a handle so the drag wins over pan. */
+        private const val HANDLE_TOUCH_RADIUS_DP = 24f
     }
 }

@@ -2,7 +2,10 @@ package com.lumen.app.data.repository
 
 import android.net.Uri
 import android.provider.DocumentsContract
+import com.lumen.app.data.db.FtsQuerySanitizer
+import com.lumen.app.data.db.dao.BookmarkDao
 import com.lumen.app.data.db.dao.DocumentDao
+import com.lumen.app.data.db.dao.NoteSearchRow
 import com.lumen.app.data.db.dao.PageSearchRow
 import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.data.text.NormalizedMatcher
@@ -21,6 +24,7 @@ import javax.inject.Singleton
 class SearchRepository @Inject constructor(
     private val pageTextDao: PageTextDao,
     private val documentDao: DocumentDao,
+    private val bookmarkDao: BookmarkDao,
 ) {
     data class Output(val results: List<SearchResult>, val isTruncated: Boolean)
 
@@ -60,19 +64,24 @@ class SearchRepository @Inject constructor(
         val candidates = if (contentTruncated) rows.take(CANDIDATE_LIMIT) else rows
 
         // Filename matching shares content search's definition of "matches":
-        // both sides pass through TextNormalizer, so "I20" finds "I-20.pdf".
-        // The extension is stripped first — merging name and extension would
-        // let "pdf" match every file and create boundary artifacts ("20p").
-        val queryTokens = rawQuery.lowercase()
-            .split(Regex("\\s+"))
-            .mapNotNull { TextNormalizer.normalize(it).ifEmpty { null } }
+        // the query parses through the same FtsQuerySanitizer path as the
+        // MATCH expression (so "802.11b/g" splits identically and quoted
+        // phrases group identically in both lanes), and both sides pass
+        // through TextNormalizer, so "I20" finds "I-20.pdf". The extension is
+        // stripped first — merging name and extension would let "pdf" match
+        // every file and create boundary artifacts ("20p").
+        // @spec SEARCH-QRY-006, SEARCH-QRY-011
+        val queryPhrases = FtsQuerySanitizer.parsePhrases(rawQuery)
+            .map { phrase -> phrase.map { it.lowercase() } }
+            .distinct()
 
         // Filename search complements content search. Skip when OCR-only filter is
         // active. Token matching runs in Kotlin because SQLite's lower() is
         // ASCII-only and instr() would force contiguous-phrase semantics; here each
-        // token may appear anywhere in the (locale-aware lowercased) basename.
+        // token may appear anywhere in the (locale-aware lowercased) basename,
+        // while a quoted phrase must appear adjacently.
         // @spec SEARCH-QRY-004
-        val filenameRows = if (filters.ocrOnly || queryTokens.isEmpty()) {
+        val filenameRows = if (filters.ocrOnly || queryPhrases.isEmpty()) {
             emptyList()
         } else {
             documentDao.indexedFilenameRows(
@@ -82,19 +91,38 @@ class SearchRepository @Inject constructor(
             )
                 .filter { row ->
                     val targets = nameMatchTargets(row.filename, row.customTitle)
-                    queryTokens.all { token -> targets.any { it.contains(token) } }
+                    queryPhrases.all { phrase -> targets.any { nameContains(it, phrase) } }
                 }
                 .filter { row -> candidates.none { it.docId == row.id } }
                 .take(FILENAME_MATCH_LIMIT)
         }
 
+        // Bookmark notes live outside both FTS tables; they get the same
+        // Kotlin-side lane as filenames, but with NormalizedMatcher semantics —
+        // notes are prose like page text, not identifiers like filenames — so a
+        // quoted phrase stays adjacent here too.
+        // @spec SEARCH-NOTE-001
+        val noteRows = if (filters.ocrOnly || queryPhrases.isEmpty()) {
+            emptyList()
+        } else {
+            bookmarkDao.noteSearchRows(
+                filterByFolder = if (filterByFolder) 1 else 0,
+                treeUris = selectedTreeUris,
+                minIndexedAt = minIndexedAt,
+            )
+                .filter { row -> NormalizedMatcher.matchesAllPhrases(row.note, rawQuery) }
+                .take(NOTE_MATCH_LIMIT)
+        }
+
         // matchinfo is parsed once per row and reused for both the relevance score
-        // and the per-result hitCount.
+        // and the per-result hitCount. A quoted phrase is ONE matchinfo phrase, so
+        // it counts once per adjacent occurrence, never once per word.
+        // @spec SEARCH-CNT-002
         val rowsWithHits = candidates.map { it to matchInfoTotalHits(it.matchInfo) }
 
         val contentSorted = when (filters.sortOrder) {
             SortOrder.RELEVANCE -> rowsWithHits
-                .map { (row, hits) -> Triple(row, hits, relevanceScore(row, hits, queryTokens)) }
+                .map { (row, hits) -> Triple(row, hits, relevanceScore(row, hits, queryPhrases)) }
                 .sortedWith(
                     compareByDescending<Triple<PageSearchRow, Int, Int>> { it.third }
                         .thenBy { it.first.filename.lowercase() }
@@ -112,6 +140,15 @@ class SearchRepository @Inject constructor(
         val filenameSorted = when (filters.sortOrder) {
             SortOrder.RELEVANCE, SortOrder.FILENAME -> filenameRows.sortedBy { it.filename.lowercase() }
             SortOrder.MOST_RECENT -> filenameRows.sortedByDescending { it.indexedAt ?: 0L }
+        }
+        val noteSorted = when (filters.sortOrder) {
+            SortOrder.RELEVANCE, SortOrder.FILENAME ->
+                noteRows.sortedWith(compareBy({ it.filename.lowercase() }, { it.pageNumber }))
+            SortOrder.MOST_RECENT -> noteRows
+                .sortedWith(
+                    compareByDescending<NoteSearchRow> { it.indexedAt ?: 0L }
+                        .thenBy { it.pageNumber }
+                )
         }
 
         // Filename matches go first: when the query names a document, that document
@@ -132,6 +169,30 @@ class SearchRepository @Inject constructor(
                     isOcr = false,
                     folderName = treeUriToFolderName(row.treeUri),
                     isFilenameMatch = true,
+                )
+            })
+            // Note matches rank between the lanes: a note is the user's own
+            // annotation — more intentional than body text — but a document
+            // named by the query is still the strongest signal.
+            // @spec SEARCH-NOTE-002, SEARCH-NOTE-003
+            addAll(noteSorted.map { row ->
+                val spans = NormalizedMatcher.findMatches(row.note, rawQuery)
+                val snippet = SnippetBuilder.build(row.note, spans)
+                SearchResult(
+                    // Offset keeps synthetic note keys clear of the filename
+                    // rows' -docId keys.
+                    lineId = -(NOTE_KEY_OFFSET + row.bookmarkId),
+                    docId = row.docId,
+                    uri = row.docUri,
+                    filename = row.filename,
+                    displayTitle = DocumentTitles.displayTitle(row.customTitle, row.derivedTitle, row.filename),
+                    pageNumber = row.pageNumber,
+                    lineNumber = 0,
+                    snippet = snippet.text,
+                    snippetHighlights = snippet.highlights,
+                    isOcr = false,
+                    folderName = treeUriToFolderName(row.treeUri),
+                    isNoteMatch = true,
                 )
             })
             addAll(contentSorted.map { (row, hits) ->
@@ -174,11 +235,11 @@ class SearchRepository @Inject constructor(
         results: List<SearchResult>,
         rawQuery: String,
     ): List<SearchResult> {
-        val pageIds = results.filter { !it.isFilenameMatch }.map { it.lineId }
+        val pageIds = results.filter { !it.isFilenameMatch && !it.isNoteMatch }.map { it.lineId }
         if (pageIds.isEmpty()) return results
         val textById = pageTextDao.textsForPages(pageIds).associate { it.pageId to it.text }
         return results.map { result ->
-            val text = if (result.isFilenameMatch) null else textById[result.lineId]
+            val text = if (result.isFilenameMatch || result.isNoteMatch) null else textById[result.lineId]
             if (text == null) {
                 result
             } else {
@@ -192,16 +253,23 @@ class SearchRepository @Inject constructor(
     suspend fun searchPagesInDocument(sanitizedQuery: String, docUri: String): List<Int> =
         pageTextDao.searchPagesInDocument(sanitizedQuery, docUri)
 
-    /** Precomputed matchinfo hits on the page + a boost per normalized token
+    /** Precomputed matchinfo hits on the page + a boost per normalized phrase
      *  that also appears in the document's name (basename or custom title). */
-    private fun relevanceScore(row: PageSearchRow, hits: Int, queryTokens: List<String>): Int {
+    private fun relevanceScore(row: PageSearchRow, hits: Int, queryPhrases: List<List<String>>): Int {
         var score = hits
-        if (queryTokens.isNotEmpty()) {
+        if (queryPhrases.isNotEmpty()) {
             val targets = nameMatchTargets(row.filename, row.customTitle)
-            score += queryTokens.count { token -> targets.any { it.contains(token) } } * FILENAME_TOKEN_BOOST
+            score += queryPhrases.count { phrase -> targets.any { nameContains(it, phrase) } } * FILENAME_TOKEN_BOOST
         }
         return score
     }
+
+    /** One phrase against one name target: single tokens keep the lane's
+     *  contains semantics; a quoted phrase must appear adjacently. */
+    // @spec SEARCH-QRY-011
+    private fun nameContains(target: String, phrase: List<String>): Boolean =
+        if (phrase.size == 1) target.contains(phrase[0])
+        else NormalizedMatcher.containsAdjacent(target, phrase)
 
     /** The document-name match targets of SEARCH-QRY-004: the extension-stripped
      *  normalized basename, plus the normalized custom title when one exists.
@@ -251,6 +319,14 @@ class SearchRepository @Inject constructor(
 
         /** Cap on filename-match rows, applied after token filtering in Kotlin. */
         const val FILENAME_MATCH_LIMIT = 200
+
+        /** Cap on note-match rows: notes are few, and a runaway match set must
+         *  not crowd content rows out of the shared result cap. */
+        const val NOTE_MATCH_LIMIT = 50
+
+        /** Keeps note rows' synthetic negative keys clear of the filename
+         *  rows' -docId keys. */
+        const val NOTE_KEY_OFFSET = 1_000_000_000L
     }
 
     private fun treeUriToFolderName(treeUri: String): String {

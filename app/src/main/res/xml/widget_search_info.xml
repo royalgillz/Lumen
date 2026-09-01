@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static content: updatePeriodMillis=0 means the system never wakes the app
+     to refresh; the pill is redrawn only on placement/boot (onUpdate). -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_search_description"
+    android:initialLayout="@layout/widget_search_pill"
+    android:minWidth="110dp"
+    android:minHeight="40dp"
+    android:previewLayout="@layout/widget_search_pill"
+    android:resizeMode="horizontal"
+    android:targetCellWidth="2"
+    android:targetCellHeight="1"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

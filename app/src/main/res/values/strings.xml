@@ -1,3 +1,9 @@
 <resources>
     <string name="app_name">Lumen</string>
+    <string name="shortcut_search_short">Search</string>
+    <string name="shortcut_search_long">Search PDFs</string>
+    <string name="process_text_label">Search in Lumen</string>
+    <string name="widget_search_label">Search Lumen</string>
+    <string name="widget_search_text">Search Lumen</string>
+    <string name="widget_search_description">One tap to search your PDFs</string>
 </resources>

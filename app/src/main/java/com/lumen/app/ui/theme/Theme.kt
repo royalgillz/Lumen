@@ -13,7 +13,8 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-private val LightColorScheme = lightColorScheme(
+// Internal (not private) so unit tests can pin the selection-container tones.
+internal val LightColorScheme = lightColorScheme(
     primary = ForestGreen,
     onPrimary = OnPrimaryLight,
     // Revamp: darker toolbar/background container for stronger contrast in light mode.
@@ -21,8 +22,12 @@ private val LightColorScheme = lightColorScheme(
     onPrimaryContainer = Color.White,
     secondary = Terracotta,
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFF6D9CC),
-    onSecondaryContainer = Color(0xFF3A1505),
+    // Selection containers (segmented rows, filter chips, chip-styled pills)
+    // are forest-green family, matching the nav bar's indicator — the old pale
+    // terracotta read as an error state against green chrome.
+    // @spec SET-APPEAR-006
+    secondaryContainer = Color(0xFFD6E6D6),
+    onSecondaryContainer = Color(0xFF11291A),
     tertiary = OcrTint,
     onTertiary = Color(0xFFFFFFFF),
     background = WarmWhite,
@@ -43,15 +48,16 @@ private val LightColorScheme = lightColorScheme(
     outline = Color(0xFF717971),
 )
 
-private val DarkColorScheme = darkColorScheme(
+internal val DarkColorScheme = darkColorScheme(
     primary = ForestGreenDark,
     onPrimary = OnPrimaryDark,
     primaryContainer = Color(0xFF004D28),
     onPrimaryContainer = Color(0xFFB8DFBF),
     secondary = TerracottaDark,
     onSecondary = Color(0xFF5A2410),
-    secondaryContainer = Color(0xFF5A2E1C),
-    onSecondaryContainer = Color(0xFFF6D9CC),
+    // @spec SET-APPEAR-006
+    secondaryContainer = Color(0xFF2F4A38),
+    onSecondaryContainer = Color(0xFFCCE5D2),
     tertiary = OcrTintDark,
     onTertiary = Color(0xFF3E2800),
     background = DeepForestBg,

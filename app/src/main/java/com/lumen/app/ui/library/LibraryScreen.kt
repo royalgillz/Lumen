@@ -1,6 +1,8 @@
 package com.lumen.app.ui.library
 
+import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -30,11 +32,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.widget.Toast
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
@@ -65,6 +69,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.Switch
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -82,6 +87,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -94,9 +100,14 @@ import com.lumen.app.data.db.entity.DocumentEntity
 import com.lumen.app.domain.model.DocumentTitles
 import com.lumen.app.domain.model.LibraryCounts
 import com.lumen.app.domain.model.indexWarningLine
+import com.lumen.app.ui.common.FolderQuickPickRow
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
+import com.lumen.app.ui.common.lastPageFor
 import com.lumen.app.ui.common.quantity
+import com.lumen.app.ui.common.readingProgressLabel
+import com.lumen.app.data.fs.renameTargetFilename
+import com.lumen.app.domain.usecase.RenameDocumentFileUseCase
 import com.lumen.app.ui.theme.Terracotta
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
@@ -119,10 +130,13 @@ fun LibraryScreen(
     val sortOrder by viewModel.sortOrder.collectAsState()
     val bookmarkCounts by viewModel.bookmarkCounts.collectAsState()
     val customTitles by viewModel.customTitles.collectAsState()
-    var renameTarget by remember { mutableStateOf<DocumentEntity?>(null) }
+    val lastPages by viewModel.lastPages.collectAsState()
+    // URI, not entity: survives rotation (rememberSaveable) and re-resolves
+    // against the live list so a vanished document simply closes the dialog.
+    // @spec LIB-TTL-010
+    var renameTargetUri by rememberSaveable { mutableStateOf<String?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
     var gridMode by rememberSaveable { mutableStateOf(true) }
     var bookmarkedOnly by rememberSaveable { mutableStateOf(false) }
 
@@ -132,17 +146,28 @@ fun LibraryScreen(
         uri?.let { viewModel.addFolder(it) }
     }
 
-    LibraryDocumentSheetHost(viewModel = viewModel, onOpenDocument = onOpenDocument)
+    LibraryDocumentSheetHost(
+        viewModel = viewModel,
+        onOpenDocument = onOpenDocument,
+        snackbarHostState = snackbarHostState,
+        onRenameSucceeded = { renameTargetUri = null },
+    )
 
-    renameTarget?.let { doc ->
-        RenameDocumentDialog(
-            currentTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
-            hasCustomTitle = customTitles.containsKey(doc.uri),
-            onSave = { newTitle ->
-                viewModel.renameDocument(doc.uri, newTitle)
-                renameTarget = null
-            },
-            onDismiss = { renameTarget = null },
+    // Loaded-list resolution: a target that vanished from the list (deleted,
+    // or re-keyed by a completed rename) closes the dialog and clears the
+    // saved state; a still-loading list (null) decides nothing yet.
+    LaunchedEffect(documentsOrNull, renameTargetUri) {
+        val loaded = documentsOrNull ?: return@LaunchedEffect
+        if (renameTargetUri != null && loaded.none { it.uri == renameTargetUri }) {
+            renameTargetUri = null
+        }
+    }
+
+    renameTargetUri?.let { uri -> documents.firstOrNull { it.uri == uri } }?.let { doc ->
+        RenameDocumentDialogHost(
+            doc = doc,
+            viewModel = viewModel,
+            onDismiss = { renameTargetUri = null },
         )
     }
 
@@ -190,7 +215,7 @@ fun LibraryScreen(
                 // First load still in flight — render nothing rather than flashing
                 // the "No folders added yet" state at a populated library.
             } else if (folders.isEmpty() && documents.isEmpty()) {
-                LibraryEmptyState(onAdd = { folderPickerLauncher.launch(null) })
+                LibraryEmptyState(onPick = { folderPickerLauncher.launch(it) })
             } else {
                 IndexHealthCard(
                     documents = documents,
@@ -215,6 +240,7 @@ fun LibraryScreen(
                             visibleDocuments = visibleDocuments,
                             bookmarkCounts = bookmarkCounts,
                             customTitles = customTitles,
+                            lastPages = lastPages,
                             bookmarkedOnly = bookmarkedOnly,
                             gridMode = gridMode,
                             sortOrder = sortOrder,
@@ -222,7 +248,7 @@ fun LibraryScreen(
                             onToggleGrid = { gridMode = !gridMode },
                             onSetSortOrder = { viewModel.setSortOrder(it) },
                             onTapDocument = { viewModel.showDocumentDetail(it) },
-                            onLongPressDocument = { renameTarget = it },
+                            onLongPressDocument = { renameTargetUri = it.uri },
                             onRetryDocument = { viewModel.retryDocument(it) },
                         )
                     }
@@ -452,6 +478,7 @@ private fun DocumentRow(
     doc: DocumentEntity,
     displayTitle: String,
     bookmarkCount: Int,
+    progressLabel: String?,
     onRetry: (() -> Unit)?,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
@@ -496,6 +523,16 @@ private fun DocumentRow(
                         else
                             MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // Only opened documents carry a position — unopened rows
+                    // stay quiet.
+                    // @spec LIB-PRG-001
+                    if (progressLabel != null) {
+                        Text(
+                            text = progressLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
                 if (bookmarkCount > 0) {
                     Row(
@@ -537,6 +574,7 @@ private fun DocumentGridCard(
     doc: DocumentEntity,
     displayTitle: String,
     bookmarkCount: Int,
+    progressLabel: String?,
     modifier: Modifier = Modifier,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
@@ -624,6 +662,16 @@ private fun DocumentGridCard(
                     overflow = TextOverflow.MiddleEllipsis,
                 )
             }
+            // @spec LIB-PRG-001
+            if (progressLabel != null) {
+                Text(
+                    text = progressLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -657,7 +705,10 @@ private fun DocumentDetailSheet(
     onReindex: () -> Unit,
     onOpenPdf: () -> Unit,
     onOpenAtPage: (Int) -> Unit,
+    onRename: () -> Unit,
     onDismiss: () -> Unit,
+    // Hidden when the sheet is opened from inside the viewer (LIB-REN-007).
+    showOpenAction: Boolean = true,
 ) {
     Column(
         modifier = Modifier
@@ -704,6 +755,55 @@ private fun DocumentDetailSheet(
         DetailRow("Pages", doc.pageCount.toString())
         DetailRow("OCR pages", "$ocrPageCount of ${doc.pageCount}")
         DetailRow("File size", formatBytes(doc.sizeBytes))
+        // Embedded PDF metadata, labeled as such — an ugly-but-real value
+        // ("Microsoft Office User") is honest information here.
+        // @spec LIB-TTL-014
+        doc.author?.takeIf { it.isNotBlank() }?.let { DetailRow("Author", it) }
+        // Where the file lives, with a best-effort jump to that folder in the
+        // system Files app — indexed documents always have a real containing
+        // folder, so the row only hides on an underivable (malformed) URI.
+        // @spec LIB-LOC-001, LIB-LOC-002
+        val folderPath = remember(doc.uri) {
+            com.lumen.app.data.fs.DocumentLocations.folderDisplayPath(doc.uri)
+        }
+        if (folderPath != null) {
+            val context = LocalContext.current
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { openContainingFolder(context, doc.uri) }
+                    .padding(vertical = 5.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Location",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 16.dp),
+                ) {
+                    Text(
+                        folderPath,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.MiddleEllipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = "Open folder",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
         if (doc.indexedAt != null) {
             DetailRow("Indexed", java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault()).format(java.util.Date(doc.indexedAt)))
         }
@@ -763,27 +863,29 @@ private fun DocumentDetailSheet(
 
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Surface(
-                onClick = onOpenPdf,
-                shape = RoundedCornerShape(8.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+            if (showOpenAction) {
+                Surface(
+                    onClick = onOpenPdf,
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
                 ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.OpenInNew,
-                        null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                    Text(
-                        "Open PDF",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.OpenInNew,
+                            null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Text(
+                            "Open PDF",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                 }
             }
             Surface(
@@ -798,6 +900,21 @@ private fun DocumentDetailSheet(
                 ) {
                     Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
                     Text("Re-index", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                }
+            }
+            // @spec LIB-REN-007
+            Surface(
+                onClick = onRename,
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(Icons.Default.Edit, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurface)
+                    Text("Rename", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
                 }
             }
         }
@@ -817,6 +934,33 @@ private fun DetailRow(label: String, value: String) {
     }
 }
 
+/**
+ * Best-effort jump to the document's containing folder in the system Files
+ * app. Folder viewing has no universal Android intent — stock and near-stock
+ * handle a directory-typed VIEW; where nothing does, the Location row's text
+ * still tells the user where the file is.
+ */
+// @spec LIB-LOC-002
+private fun openContainingFolder(context: android.content.Context, docUri: String) {
+    val parentId = com.lumen.app.data.fs.DocumentLocations.parentDocumentId(docUri)
+    val folderUri = parentId?.let {
+        // The tree-form document URI carries its own tree segment, so it can
+        // serve as the tree reference for building the folder's URI.
+        runCatching { DocumentsContract.buildDocumentUriUsingTree(Uri.parse(docUri), it) }.getOrNull()
+    }
+    if (folderUri == null) {
+        Toast.makeText(context, "Couldn't work out this file's folder", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(folderUri, DocumentsContract.Document.MIME_TYPE_DIR)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching { context.startActivity(intent) }.onFailure {
+        Toast.makeText(context, "No app can open this folder", Toast.LENGTH_SHORT).show()
+    }
+}
+
 private fun formatBytes(bytes: Long): String = when {
     bytes <= 0 -> "Unknown"
     bytes < 1024 -> "$bytes B"
@@ -824,15 +968,25 @@ private fun formatBytes(bytes: Long): String = when {
     else -> DecimalFormat("0.0").format(bytes / (1024.0 * 1024.0)) + " MB"
 }
 
+// The SAF picker opens on an empty tree and loses week-one users — the
+// quick-pick chips land it at the folders PDFs actually live in. [onPick]
+// launches the standard OpenDocumentTree flow with the chip's initial URI,
+// or with null for the generic affordance.
+// @spec LIB-QPK-001
 @Composable
-internal fun LibraryEmptyState(onAdd: () -> Unit) {
+internal fun LibraryEmptyState(onPick: (Uri?) -> Unit) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 32.dp),
+        ) {
             Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(72.dp), tint = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(16.dp))
             Text("No folders added yet", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
-            Text("Tap + Add Folder to pick a folder full of PDFs", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
+            Text("Pick a folder full of PDFs to search them offline", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(16.dp))
+            FolderQuickPickRow(onPick = onPick)
         }
     }
 }
@@ -865,19 +1019,33 @@ internal fun LostAccessBanner(folderCount: Int) {
     }
 }
 
+/** The file-rename half of the rename dialog: availability gate + callbacks. */
+internal data class FileRenameUi(
+    val gate: LibraryViewModel.FileRenameGate?, // null while probing
+    val inFlight: Boolean,
+    val onRenameFile: (String) -> Unit,
+    val onRequestWriteGrant: () -> Unit,
+)
+
 // Prefilled with the current display title; Save with blank input resets to
-// automatic, as does the explicit reset action.
-// @spec LIB-TTL-004
+// automatic, as does the explicit reset action. With the toggle on, Save
+// renames the actual file instead (gated on write access + provider support).
+// @spec LIB-TTL-004, LIB-REN-001, LIB-REN-004, LIB-REN-009
 @Composable
 internal fun RenameDocumentDialog(
     currentTitle: String,
     hasCustomTitle: Boolean,
     onSave: (String?) -> Unit,
     onDismiss: () -> Unit,
+    fileRename: FileRenameUi? = null,
 ) {
-    var input by remember { mutableStateOf(currentTitle) }
+    // @spec LIB-TTL-010 — typed input and the toggle survive rotation.
+    var input by rememberSaveable { mutableStateOf(currentTitle) }
+    var renameFile by rememberSaveable { mutableStateOf(false) }
+    val gate = fileRename?.gate
+    val fileMode = renameFile && fileRename != null
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (fileRename?.inFlight != true) onDismiss() },
         title = { Text("Rename document") },
         text = {
             Column {
@@ -887,39 +1055,237 @@ internal fun RenameDocumentDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (fileRename != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Also rename the file on device",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Switch(
+                            checked = renameFile,
+                            onCheckedChange = { renameFile = it },
+                            enabled = !fileRename.inFlight &&
+                                gate !is LibraryViewModel.FileRenameGate.Unsupported &&
+                                gate !is LibraryViewModel.FileRenameGate.IndexingRunning,
+                        )
+                    }
+                }
+                val helper = when {
+                    !fileMode -> when (gate) {
+                        is LibraryViewModel.FileRenameGate.Unsupported ->
+                            "Only the Lumen name can change — this storage location doesn't support renaming files."
+                        is LibraryViewModel.FileRenameGate.IndexingRunning ->
+                            "File rename is available after indexing finishes."
+                        else -> "Only the name shown in Lumen changes — the file itself is untouched."
+                    }
+                    else -> when (gate) {
+                        null -> "Checking folder access…"
+                        is LibraryViewModel.FileRenameGate.Ready ->
+                            "Renames the actual PDF on your phone."
+                        is LibraryViewModel.FileRenameGate.NeedsWriteGrant ->
+                            "Lumen has read-only access to this folder — re-grant access to rename the file."
+                        is LibraryViewModel.FileRenameGate.IndexingRunning ->
+                            "Wait for indexing to finish."
+                        is LibraryViewModel.FileRenameGate.Unsupported ->
+                            "This storage location doesn't support renaming."
+                    }
+                }
                 Text(
-                    "Only the name shown in Lumen changes — the file itself is untouched.",
+                    helper,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp),
                 )
+                if (fileMode && gate is LibraryViewModel.FileRenameGate.NeedsWriteGrant) {
+                    TextButton(onClick = fileRename!!.onRequestWriteGrant) {
+                        Text("Re-grant folder access")
+                    }
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(input) }) { Text("Save") }
+            TextButton(
+                onClick = {
+                    if (fileMode) fileRename!!.onRenameFile(input) else onSave(input)
+                },
+                enabled = fileRename?.inFlight != true && (
+                    !fileMode ||
+                        (gate is LibraryViewModel.FileRenameGate.Ready &&
+                            renameTargetFilename(input) != null)
+                    ),
+            ) { Text(if (fileRename?.inFlight == true) "Renaming…" else "Save") }
         },
         dismissButton = {
             Row {
-                if (hasCustomTitle) {
+                if (hasCustomTitle && !fileMode) {
                     TextButton(onClick = { onSave(null) }) { Text("Reset to automatic") }
                 }
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+                TextButton(
+                    onClick = onDismiss,
+                    enabled = fileRename?.inFlight != true,
+                ) { Text("Cancel") }
             }
         },
     )
 }
 
-/** The document detail bottom sheet, hosted by any screen showing library rows. */
+/**
+ * One host for the rename dialog: probes the file-rename gate, owns the
+ * re-grant launcher, routes Lumen-only vs on-device saves, and reports results.
+ * Failure keeps the dialog open with the Lumen-only save still available.
+ */
+// @spec LIB-REN-004, LIB-REN-006
+@Composable
+internal fun RenameDocumentDialogHost(
+    doc: DocumentEntity,
+    viewModel: LibraryViewModel,
+    onDismiss: () -> Unit,
+) {
+    val customTitles by viewModel.customTitles.collectAsState()
+    val scope = rememberCoroutineScope()
+    var gate by remember(doc.uri) {
+        mutableStateOf<LibraryViewModel.FileRenameGate?>(null)
+    }
+    // In-flight and results live in the ViewModel: this host dies on rotation
+    // (and on success, when the re-keyed URI stops resolving), so it only
+    // starts renames — FileRenameResultEffect in the sheet host delivers.
+    val delivery by viewModel.fileRename.collectAsState()
+    val inFlight = delivery?.docUri == doc.uri && delivery?.result == null
+    LaunchedEffect(doc.uri) { gate = viewModel.fileRenameGate(doc) }
+    val regrantLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let {
+            scope.launch {
+                viewModel.addFolderAndWait(it)
+                gate = viewModel.fileRenameGate(doc)
+            }
+        }
+    }
+    RenameDocumentDialog(
+        currentTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
+        hasCustomTitle = customTitles.containsKey(doc.uri),
+        onSave = { newTitle ->
+            viewModel.renameDocument(doc.uri, newTitle)
+            onDismiss()
+        },
+        onDismiss = onDismiss,
+        fileRename = FileRenameUi(
+            gate = gate,
+            inFlight = inFlight,
+            onRenameFile = { typed -> viewModel.startFileRename(doc, typed) },
+            onRequestWriteGrant = {
+                regrantLauncher.launch(
+                    doc.treeUri.takeIf { it.isNotBlank() }?.let(Uri::parse)
+                )
+            },
+        ),
+    )
+}
+
+/**
+ * Single per-ViewModel consumer of on-device rename results. Lives in the
+ * document-sheet host — present exactly once on every screen that can start a
+ * rename and recreated after rotation — so the outcome (snackbar, dialog
+ * dismissal, the viewer's LIB-REN-008 nav-entry swap) still lands when the
+ * dialog that started the rename is gone. Failure keeps the dialog open
+ * (LIB-REN-006): only success dismisses.
+ */
+// @spec LIB-REN-006, LIB-REN-008
+@Composable
+private fun FileRenameResultEffect(
+    viewModel: LibraryViewModel,
+    notify: (String) -> Unit,
+    onFileRenamed: ((newUri: String, newFilename: String) -> Unit)?,
+    onRenameSucceeded: () -> Unit,
+) {
+    val delivery by viewModel.fileRename.collectAsState()
+    LaunchedEffect(delivery) {
+        val res = delivery?.result ?: return@LaunchedEffect
+        viewModel.consumeFileRename()
+        when (res) {
+            is RenameDocumentFileUseCase.Result.Renamed -> {
+                notify("Renamed to ${res.newFilename}")
+                viewModel.hideDocumentDetail()
+                onRenameSucceeded()
+                onFileRenamed?.invoke(res.newUri, res.newFilename)
+            }
+            is RenameDocumentFileUseCase.Result.Failed -> notify(res.message)
+        }
+    }
+}
+
+/** The document detail bottom sheet, hosted by any screen showing library rows.
+ *  Also hosts the sheet's Rename action and its dialog (LIB-REN-007). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun LibraryDocumentSheetHost(
     viewModel: LibraryViewModel,
     onOpenDocument: (uri: String, filename: String, page: Int) -> Unit,
+    snackbarHostState: SnackbarHostState? = null,
+    // false when hosted by the viewer: the document is already open.
+    showOpenAction: Boolean = true,
+    // Viewer hook: swap the open document to its post-rename URI (LIB-REN-008).
+    onFileRenamed: ((newUri: String, newFilename: String) -> Unit)? = null,
+    // Screens hosting their own long-press rename dialog clear it here on
+    // success (an in-place rename keeps its URI, so resolution alone won't).
+    onRenameSucceeded: (() -> Unit)? = null,
 ) {
     val selectedDocument by viewModel.selectedDocument.collectAsState()
     val selectedDocOcrPages by viewModel.selectedDocOcrPages.collectAsState()
     val selectedDocBookmarks by viewModel.selectedDocBookmarks.collectAsState()
     val customTitles by viewModel.customTitles.collectAsState()
+    // This host outlives the dialog that starts a rename — its scope carries
+    // the outcome snackbar past the dialog's unmount.
+    val notifyScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // Hosts without a snackbar (search results, merged screen) still surface
+    // outcomes — LIB-REN-006 requires a visible error.
+    val notify: (String) -> Unit = { message ->
+        if (snackbarHostState != null) {
+            notifyScope.launch { snackbarHostState.showSnackbar(message) }
+        } else {
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+    // The sheet's selection survives rotation in the ViewModel; the dialog's
+    // existence rides on it via a saveable URI.
+    // @spec LIB-TTL-010
+    var renameTargetUri by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // A saved target that no longer resolves (process death cleared the
+    // selection, or the document vanished) is cleared rather than left to
+    // resurrect the dialog when the same document is selected again later.
+    LaunchedEffect(selectedDocument, renameTargetUri) {
+        if (renameTargetUri != null && selectedDocument?.uri != renameTargetUri) {
+            renameTargetUri = null
+        }
+    }
+
+    FileRenameResultEffect(
+        viewModel = viewModel,
+        notify = notify,
+        onFileRenamed = onFileRenamed,
+        onRenameSucceeded = {
+            renameTargetUri = null
+            onRenameSucceeded?.invoke()
+        },
+    )
+
+    renameTargetUri?.let { uri -> selectedDocument?.takeIf { it.uri == uri } }?.let { doc ->
+        RenameDocumentDialogHost(
+            doc = doc,
+            viewModel = viewModel,
+            onDismiss = { renameTargetUri = null },
+        )
+    }
+
     if (selectedDocument != null) {
         ModalBottomSheet(onDismissRequest = { viewModel.hideDocumentDetail() }) {
             val doc = selectedDocument!!
@@ -944,7 +1310,9 @@ internal fun LibraryDocumentSheetHost(
                     onOpenDocument(doc.uri, doc.filename, page)
                     viewModel.hideDocumentDetail()
                 },
+                onRename = { renameTargetUri = selectedDocument?.uri },
                 onDismiss = { viewModel.hideDocumentDetail() },
+                showOpenAction = showOpenAction,
             )
         }
     }
@@ -957,6 +1325,7 @@ internal fun LazyListScope.libraryDocumentsItems(
     visibleDocuments: List<DocumentEntity>,
     bookmarkCounts: Map<String, Int>,
     customTitles: Map<String, String>,
+    lastPages: Map<String, Int>,
     bookmarkedOnly: Boolean,
     gridMode: Boolean,
     sortOrder: LibrarySortOrder,
@@ -1056,6 +1425,8 @@ internal fun LazyListScope.libraryDocumentsItems(
                 doc = doc,
                 displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
                 bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
+                progressLabel = lastPageFor(lastPages, doc.uri)
+                    ?.let { readingProgressLabel(it, doc.pageCount) },
                 onRetry = if (doc.status == DocumentEntity.STATUS_ERROR) {
                     { onRetryDocument(doc) }
                 } else null,
@@ -1076,6 +1447,8 @@ internal fun LazyListScope.libraryDocumentsItems(
                         doc = doc,
                         displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
                         bookmarkCount = bookmarkCounts[doc.uri] ?: 0,
+                        progressLabel = lastPageFor(lastPages, doc.uri)
+                            ?.let { readingProgressLabel(it, doc.pageCount) },
                         modifier = Modifier.weight(1f),
                         onTap = { onTapDocument(doc) },
                         onLongPress = { onLongPressDocument(doc) },

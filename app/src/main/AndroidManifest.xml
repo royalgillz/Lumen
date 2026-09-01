@@ -61,7 +61,39 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/pdf" />
             </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- Text-selection toolbar entry ("Search in Lumen"): an alias so the
+             PROCESS_TEXT surface carries its own label while the handling stays
+             in MainActivity. -->
+        <activity-alias
+            android:name=".launcher.ProcessTextSearch"
+            android:exported="true"
+            android:label="@string/process_text_label"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Home-screen "Search Lumen" pill. Not exported: the system delivers
+             APPWIDGET_UPDATE regardless; other apps have no business here. -->
+        <receiver
+            android:name=".launcher.SearchWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_search_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_search_info" />
+        </receiver>
 
         <!-- WorkManager foreground service, must declare type to match FOREGROUND_SERVICE_DATA_SYNC -->
         <service

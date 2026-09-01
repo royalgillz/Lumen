@@ -48,11 +48,24 @@ class SafRepository @Inject constructor(
         prefs[KEY_FOLDER_URIS].orEmpty().map { Uri.parse(it) }.toSet()
     }
 
+    // Read AND write persisted: the system picker offers both on a tree pick,
+    // and the write half is what makes on-device file rename possible. Folders
+    // granted by older builds hold read-only — they need a re-pick to upgrade
+    // (Android persists only grants currently held).
+    // @spec LIB-REN-005
     suspend fun addFolder(treeUri: Uri) {
-        context.contentResolver.takePersistableUriPermission(
-            treeUri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION
-        )
+        val readWrite = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        try {
+            context.contentResolver.takePersistableUriPermission(treeUri, readWrite)
+        } catch (_: SecurityException) {
+            // A picker that offered no write grant: keep the folder usable
+            // read-only; rename stays gated on hasWritePermission.
+            context.contentResolver.takePersistableUriPermission(
+                treeUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
         dataStore.edit { prefs ->
             val current = prefs[KEY_FOLDER_URIS].orEmpty().toMutableSet()
             current.add(treeUri.toString())
@@ -60,13 +73,21 @@ class SafRepository @Inject constructor(
         }
     }
 
+    // @spec LIB-REN-005
     suspend fun removeFolder(treeUri: Uri) {
         try {
             context.contentResolver.releasePersistableUriPermission(
                 treeUri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-        } catch (_: SecurityException) {}
+        } catch (_: SecurityException) {
+            try {
+                context.contentResolver.releasePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {}
+        }
         dataStore.edit { prefs ->
             val current = prefs[KEY_FOLDER_URIS].orEmpty().toMutableSet()
             current.remove(treeUri.toString())
@@ -74,10 +95,93 @@ class SafRepository @Inject constructor(
         }
     }
 
+    /** Whether the file-rename toggle can act in this folder (LIB-REN-004). */
+    fun hasWritePermission(treeUri: Uri): Boolean =
+        context.contentResolver.persistedUriPermissions.any {
+            it.uri == treeUri && it.isWritePermission
+        }
+
     fun hasPersistedPermission(treeUri: Uri): Boolean =
         context.contentResolver.persistedUriPermissions.any {
             it.uri == treeUri && it.isReadPermission
         }
+
+    // ── External-open grants ──────────────────────────────────────────────────
+
+    /** Takes a persistable read grant for an externally opened document when the
+     *  sender offered one; most mailers don't — failure is fine, the grant stays
+     *  transient and the recents entry self-heals when it dies. */
+    // @spec LIB-REC-004
+    fun takePersistableReadIfOffered(uri: Uri, intentFlags: Int) {
+        if (intentFlags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION == 0) return
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {}
+    }
+
+    /** Releases any persisted read grant held for a deleted external-opens row —
+     *  the app never retains access to a document it no longer references. */
+    // @spec LIB-REC-007
+    fun releasePersistedRead(uriString: String) {
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return
+        val held = context.contentResolver.persistedUriPermissions.any {
+            it.uri == uri && it.isReadPermission
+        }
+        if (!held) return
+        try {
+            context.contentResolver.releasePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {}
+    }
+
+    /** Whether Lumen holds a persisted read grant for exactly [uri] — the
+     *  single-document check behind the external-access offers (a doc URI
+     *  never string-equals a tree URI, so tree grants can't false-positive;
+     *  folder coverage is [anyLibraryTreeCovers]). */
+    // @spec LIB-EXT-007
+    fun hasPersistedRead(uri: Uri): Boolean =
+        context.contentResolver.persistedUriPermissions.any {
+            it.uri == uri && it.isReadPermission
+        }
+
+    /** Whether any library folder covers [docUri] — an externally opened
+     *  document that is already (or will be) indexed via a granted tree needs
+     *  no access offer. Pure matching lives in [anyLibraryTreeCovers]. */
+    // @spec LIB-EXT-007, LIB-EXT-012
+    suspend fun anyLibraryTreeCovers(docUri: String): Boolean =
+        anyLibraryTreeCovers(dataStore.data.first()[KEY_FOLDER_URIS].orEmpty(), docUri)
+
+    /**
+     * Whether a library folder covers [docUri] AND that folder's tree grant is
+     * actually held right now. Coverage on paper is not access: library rows
+     * survive tree-grant loss (the lost-permission banner exists for exactly
+     * that), so releasing a doc-form grant — or skipping a keep-access record —
+     * on the strength of a dead tree destroys the one working access path.
+     */
+    /** Every persisted non-tree (single-document) read grant currently held —
+     *  the startup orphan sweep's input (LIB-EXT-020). */
+    fun persistedDocGrantUris(): List<String> =
+        context.contentResolver.persistedUriPermissions
+            .filter { it.isReadPermission && it.uri.pathSegments.firstOrNull() != "tree" }
+            .map { it.uri.toString() }
+
+    // @spec LIB-EXT-018
+    suspend fun anyLiveLibraryTreeCovers(docUri: String): Boolean {
+        val covering = dataStore.data.first()[KEY_FOLDER_URIS].orEmpty()
+            .filter { libraryTreeCoversDoc(it, docUri) }
+        if (covering.isEmpty()) return false
+        val held = context.contentResolver.persistedUriPermissions
+            .asSequence()
+            .filter { it.isReadPermission }
+            .map { it.uri.toString() }
+            .toSet()
+        return covering.any { it in held }
+    }
 
     // ── Search history ────────────────────────────────────────────────────────
 
@@ -198,6 +302,15 @@ class SafRepository @Inject constructor(
         }
     }
 
+    /** Every saved reading position, keyed by the raw stored key (encoded URI,
+     *  or a legacy `uri.hashCode()` key from older builds) — one decode per
+     *  store change, so list rows never read DataStore individually. Lookup by
+     *  document URI goes through `lastPageFor`. */
+    // @spec LIB-PRG-002
+    val lastPages: Flow<Map<String, Int>> = dataStore.data.map { prefs ->
+        parseLastPageEntries(prefs[KEY_VIEWER_LAST_PAGES].orEmpty())
+    }
+
     suspend fun getLastPage(uri: String): Int? {
         val entries = dataStore.data.first()[KEY_VIEWER_LAST_PAGES].orEmpty()
         val encodedKey = Uri.encode(uri)
@@ -206,4 +319,108 @@ class SafRepository @Inject constructor(
             ?: entries.firstOrNull { it.startsWith("$legacyKey:") }
         return entry?.substringAfter(':')?.toIntOrNull()
     }
+
+    /** Moves a document's reading position to its post-rename URI, dropping
+     *  the encoded and legacy hash-keyed old entries. */
+    // @spec LIB-REN-002
+    suspend fun rewriteLastPage(oldUri: String, newUri: String) {
+        dataStore.edit { prefs ->
+            prefs[KEY_VIEWER_LAST_PAGES] = rewriteLastPageEntries(
+                entries = prefs[KEY_VIEWER_LAST_PAGES].orEmpty(),
+                oldKeys = setOf(Uri.encode(oldUri), oldUri.hashCode().toString()),
+                newKey = Uri.encode(newUri),
+                ghostKeys = setOf(Uri.encode(newUri), newUri.hashCode().toString()),
+            )
+        }
+    }
+
+    /** Keep-access variant of [rewriteLastPage]: the old URI's position wins
+     *  (it is the session the user just read), but when the old URI has none,
+     *  a position already stored under the new URI is KEPT — in a re-pick the
+     *  new URI may hold this same document's live position from an earlier
+     *  session, never a dead file's ghost. */
+    // @spec LIB-EXT-017
+    suspend fun mergeLastPage(oldUri: String, newUri: String) {
+        dataStore.edit { prefs ->
+            prefs[KEY_VIEWER_LAST_PAGES] = rewriteLastPageEntries(
+                entries = prefs[KEY_VIEWER_LAST_PAGES].orEmpty(),
+                oldKeys = setOf(Uri.encode(oldUri), oldUri.hashCode().toString()),
+                newKey = Uri.encode(newUri),
+                ghostKeys = setOf(Uri.encode(newUri), newUri.hashCode().toString()),
+                keepNewWhenOldMissing = true,
+            )
+        }
+    }
+}
+
+/** Pure decode of the "key:page" entry set. Keys are `Uri.encode(uri)` (the
+ *  encoded form has no raw ':') or a legacy hashCode string, so the first ':'
+ *  always ends the key; malformed entries are skipped, never thrown on. */
+// @spec LIB-PRG-002
+internal fun parseLastPageEntries(entries: Set<String>): Map<String, Int> =
+    buildMap {
+        for (entry in entries) {
+            val sep = entry.indexOf(':')
+            if (sep <= 0) continue
+            val page = entry.substring(sep + 1).toIntOrNull() ?: continue
+            put(entry.substring(0, sep), page)
+        }
+    }
+
+/** Pure rewrite of the "key:page" entry set — the first old key with an entry
+ *  wins (callers list the encoded key before the legacy hash key). Any
+ *  pre-existing entry under the new URI's keys — encoded or legacy hash form
+ *  ([ghostKeys]) — is a ghost left by a dead file that had this path: always
+ *  purged, even when the document itself carried no saved position, so the
+ *  renamed document can never inherit it (getLastPage falls back to a legacy
+ *  entry exactly when no encoded one exists).
+ *
+ *  [keepNewWhenOldMissing] flips that last rule for the keep-access merge,
+ *  where the new URI's entries belong to THIS document, not a dead file: when
+ *  the old keys carry no position, the new URI's entries are kept untouched
+ *  instead of purged. */
+// @spec LIB-REN-002, LIB-REN-014, LIB-EXT-017
+internal fun rewriteLastPageEntries(
+    entries: Set<String>,
+    oldKeys: Set<String>,
+    newKey: String,
+    ghostKeys: Set<String> = setOf(newKey),
+    keepNewWhenOldMissing: Boolean = false,
+): Set<String> {
+    val ghosts = entries.filter { e -> (ghostKeys + newKey).any { e.startsWith("$it:") } }
+    val stale = entries.filter { e -> oldKeys.any { e.startsWith("$it:") } }
+    val page = oldKeys.asSequence()
+        .mapNotNull { key -> entries.firstOrNull { it.startsWith("$key:") } }
+        .firstOrNull()
+        ?.substringAfter(':')?.toIntOrNull()
+    if (page == null && keepNewWhenOldMissing) return entries - stale.toSet()
+    val kept = entries - stale.toSet() - ghosts.toSet()
+    return if (page != null) kept + "$newKey:$page" else kept
+}
+
+/** Pure half of [SafRepository.anyLibraryTreeCovers]. */
+// @spec LIB-EXT-012
+internal fun anyLibraryTreeCovers(treeUris: Collection<String>, docUri: String): Boolean =
+    treeUris.any { libraryTreeCoversDoc(it, docUri) }
+
+/**
+ * Whether the granted tree at [treeUri] covers the document at [docUri].
+ * Two forms match, both boundary-anchored — never a bare string prefix, which
+ * would conflate sibling trees (`Reports` vs `Reports2`, mirroring
+ * DocumentDao.deleteByTreeUri's rationale):
+ *  - a tree-form child URI: `<treeUri>/document/<docId>` — the `/document/`
+ *    segment is the boundary;
+ *  - a doc-form URI on the same authority whose decoded document id extends
+ *    the tree's decoded id at a `/` boundary (`primary:Docs` covers
+ *    `primary:Docs/x.pdf`); volume-root trees (`primary:`) bound at the `:`.
+ */
+// @spec LIB-EXT-012
+internal fun libraryTreeCoversDoc(treeUri: String, docUri: String): Boolean {
+    if (docUri.startsWith("$treeUri/document/")) return true
+    val treeAuthority = DocumentLocations.authorityOf(treeUri) ?: return false
+    if (treeAuthority != DocumentLocations.authorityOf(docUri)) return false
+    val treeId = DocumentLocations.treeDocumentIdOf(treeUri) ?: return false
+    val docId = DocumentLocations.documentIdOf(docUri) ?: return false
+    if (treeId.endsWith(":")) return docId.length > treeId.length && docId.startsWith(treeId)
+    return docId.startsWith("$treeId/")
 }

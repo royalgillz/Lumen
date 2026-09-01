@@ -1,6 +1,7 @@
 package com.lumen.app.data.text
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -67,5 +68,100 @@ class NormalizedMatcherTest {
     @Test
     fun noOccurrences_returnsEmpty() {
         assertEquals(emptyList<String>(), spansAsText("nothing relevant here", "f1"))
+    }
+
+    // @spec SEARCH-MATCH-005
+    @Test
+    fun quotedPhrase_adjacentWords_oneSpanPerOccurrence() {
+        assertEquals(
+            listOf("invoice 4471"),
+            spansAsText("pay invoice 4471 now", "\"invoice 4471\""),
+        )
+        // Two occurrences — two spans, not four word spans.
+        assertEquals(
+            listOf("invoice 4471", "invoice 4471"),
+            spansAsText("invoice 4471 then invoice 4471", "\"invoice 4471\""),
+        )
+    }
+
+    // @spec SEARCH-MATCH-005
+    @Test
+    fun quotedPhrase_nonAdjacentWords_noMatch() {
+        assertEquals(emptyList<String>(), spansAsText("invoice for 4471", "\"invoice 4471\""))
+        assertEquals(emptyList<String>(), spansAsText("4471 invoice", "\"invoice 4471\""))
+    }
+
+    // @spec SEARCH-MATCH-005
+    @Test
+    fun quotedPhrase_toleratesDeletedPunctuationAndWhitespaceBetweenWords() {
+        assertEquals(
+            listOf("invoice, 4471"),
+            spansAsText("see invoice, 4471 here", "\"invoice 4471\""),
+        )
+        assertEquals(
+            listOf("invoice\n4471"),
+            spansAsText("total invoice\n4471 due", "\"invoice 4471\""),
+        )
+    }
+
+    // @spec SEARCH-MATCH-005
+    @Test
+    fun quotedPhrase_doesNotMatchMergedToken() {
+        // "invoice-4471" normalizes to ONE indexed token; the FTS phrase does
+        // not match it, so the matcher must not either.
+        assertEquals(emptyList<String>(), spansAsText("invoice-4471 paid", "\"invoice 4471\""))
+    }
+
+    // @spec SEARCH-MATCH-005
+    @Test
+    fun quotedPhrase_tokensKeepPrefixSemantics() {
+        // Mirrors the FTS phrase "invoice* 44*".
+        assertEquals(listOf("invoice 44"), spansAsText("pay invoice 4471 now", "\"invoice 44\""))
+        // But a phrase token never matches mid-word: "voice 4471" is not there.
+        assertEquals(emptyList<String>(), spansAsText("pay invoice 4471 now", "\"voice 4471\""))
+    }
+
+    // @spec SEARCH-MATCH-002, SEARCH-MATCH-005
+    @Test
+    fun quotedPhrase_foldsCaseAndDiacritics() {
+        assertEquals(listOf("Café Noir"), spansAsText("the Café Noir menu", "\"cafe noir\""))
+    }
+
+    // @spec SEARCH-MATCH-005
+    @Test
+    fun singleWordInQuotes_behavesAsPlainToken() {
+        assertEquals(
+            spansAsText("a visa for a visa holder", "visa"),
+            spansAsText("a visa for a visa holder", "\"visa\""),
+        )
+    }
+
+    // @spec SEARCH-MATCH-005
+    @Test
+    fun mixedQuery_phraseAndTokenSpansInDocumentOrder() {
+        val text = "paid invoice 4471 today"
+        val spans = NormalizedMatcher.findMatches(text, "paid \"invoice 4471\"")
+        assertEquals(listOf("paid", "invoice 4471"), spans.map { text.substring(it) })
+    }
+
+    // @spec SEARCH-NOTE-001
+    @Test
+    fun matchesAllPhrases_requiresEveryPhrase() {
+        assertTrue(NormalizedMatcher.matchesAllPhrases("invoice 4471 paid", "paid \"invoice 4471\""))
+        assertFalse(NormalizedMatcher.matchesAllPhrases("invoice 4471", "paid \"invoice 4471\""))
+        assertFalse(NormalizedMatcher.matchesAllPhrases("4471 invoice paid", "\"invoice 4471\""))
+        assertFalse(NormalizedMatcher.matchesAllPhrases("", "invoice"))
+    }
+
+    // @spec SEARCH-QRY-011
+    @Test
+    fun containsAdjacent_filenameLaneSemantics() {
+        assertTrue(NormalizedMatcher.containsAdjacent("invoice 4471 final", listOf("invoice", "4471")))
+        assertFalse(NormalizedMatcher.containsAdjacent("invoice final 4471", listOf("invoice", "4471")))
+        // First token may start mid-word (the lane's contains looseness)...
+        assertTrue(NormalizedMatcher.containsAdjacent("myinvoice 4471", listOf("invoice", "4471")))
+        // ...later tokens must start the immediately following word.
+        assertFalse(NormalizedMatcher.containsAdjacent("invoice x4471", listOf("invoice", "4471")))
+        assertTrue(NormalizedMatcher.containsAdjacent("invoices 4471", listOf("invoice", "4471")))
     }
 }

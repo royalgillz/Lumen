@@ -2,6 +2,7 @@ package com.lumen.app.domain.model
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -79,9 +80,110 @@ class DocumentTitlesTest {
         assertEquals(DocumentTitles.NONE, deriveFromMetadata("Microsoft Word - final_v2.docx"))
         assertEquals(DocumentTitles.NONE, deriveFromMetadata("PowerPoint Presentation"))
         assertEquals(DocumentTitles.NONE, deriveFromMetadata("final_v2.docx"))
-        assertEquals(DocumentTitles.NONE, deriveFromMetadata("ab")) // < 3 chars
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("a")) // below even the 2-char metadata floor
         assertEquals(DocumentTitles.NONE, deriveFromMetadata("x".repeat(121))) // > 120
         assertEquals(DocumentTitles.NONE, deriveFromMetadata("2026-05-05")) // < 40% letters
+    }
+
+    // Real-world generator boilerplate the original list let through.
+    // @spec LIB-TTL-007
+    @Test
+    fun metadata_rejectsRealWorldGeneratorJunk() {
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Untitled document"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("untitled-1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Blank document"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("New Document 2"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("PDF Document"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Doc1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Presentation1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Book1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Sheet1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Workbook 2"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Layout 1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Microsoft PowerPoint - Presentation1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Microsoft Excel - Book1"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("PowerPoint-Präsentation"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Adobe Photoshop PDF"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Full page photo"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Print"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Printout"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Scan"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Scanned Document"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Scan 05072026"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("Scanned by CamScanner"))
+    }
+
+    // Anchored patterns must not swallow real titles that merely start with a
+    // generator word.
+    // @spec LIB-TTL-007
+    @Test
+    fun metadata_realTitlesStartingWithGeneratorWords_pass() {
+        assertEquals(
+            "Microsoft Excel 2019 Bible",
+            deriveFromMetadata("Microsoft Excel 2019 Bible"),
+        )
+        assertEquals(
+            "Untitled: The Real Wallis Simpson",
+            deriveFromMetadata("Untitled: The Real Wallis Simpson"),
+        )
+    }
+
+    // @spec LIB-TTL-007
+    @Test
+    fun metadata_rejectsPathAndFilenameShapedTitles() {
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("""C:\Users\jane\Desktop\final.doc"""))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("C:/scans/output"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("/home/jane/thesis"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("resume.jpg"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("newsletter_v3.pub"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("slides-final.odp"))
+        assertEquals(DocumentTitles.NONE, deriveFromMetadata("index.html"))
+    }
+
+    // Boilerplate rejection is full-match: real titles that merely contain a
+    // junk word must pass.
+    // @spec LIB-TTL-007
+    @Test
+    fun metadata_junkPatternsInsideRealTitlesStillPass() {
+        assertEquals("Scandinavian Design History", deriveFromMetadata("Scandinavian Design History"))
+        assertEquals("Document Retention Policy", deriveFromMetadata("Document Retention Policy"))
+        assertEquals("Printing Money: A History", deriveFromMetadata("Printing Money: A History"))
+    }
+
+    // Metadata strings can carry embedded newlines and control bytes; they are
+    // collapsed to single spaces, never shown raw.
+    // @spec LIB-TTL-007
+    @Test
+    fun metadata_collapsesWhitespaceAndControlCharacters() {
+        assertEquals("Visa Approval Notice", deriveFromMetadata("Visa\r\nApproval\tNotice"))
+        assertEquals("Visa Approval", deriveFromMetadata("Visa\u0000 Approval"))
+    }
+
+    // ── Author sanitization ───────────────────────────────────────────────────
+
+    // @spec LIB-TTL-012
+    @Test
+    fun author_trimmedAndCollapsed() {
+        assertEquals("Jane Q. Public", DocumentTitles.sanitizeAuthor("  Jane  Q.\tPublic "))
+        assertEquals("Jane Doe", DocumentTitles.sanitizeAuthor("Jane\r\nDoe"))
+    }
+
+    // @spec LIB-TTL-012
+    @Test
+    fun author_blankOrAbsurdBecomesNull() {
+        assertNull(DocumentTitles.sanitizeAuthor(null))
+        assertNull(DocumentTitles.sanitizeAuthor("   "))
+        assertNull(DocumentTitles.sanitizeAuthor("\u0000\u0007"))
+        assertNull(DocumentTitles.sanitizeAuthor("x".repeat(121)))
+    }
+
+    // Deliberately no junk reject-list for authors: the value is labeled as
+    // metadata where shown, so honest-but-ugly stays.
+    // @spec LIB-TTL-012
+    @Test
+    fun author_uglyButHonestValuesKept() {
+        assertEquals("Microsoft Office User", DocumentTitles.sanitizeAuthor("Microsoft Office User"))
+        assertEquals("admin", DocumentTitles.sanitizeAuthor("admin"))
     }
 
     // ── First-line fallback ───────────────────────────────────────────────────
@@ -119,6 +221,21 @@ class DocumentTitlesTest {
             filename = generated,
         )
         assertEquals("Visa Approval Notice", derived)
+    }
+
+    // Metadata-only allowances: an author typed these; page-0 stays strict.
+    // @spec LIB-TTL-007
+    @Test
+    fun metadata_shortNumericAndTwoCharTitles_acceptedFromMetadataOnly() {
+        assertEquals("1984", DocumentTitles.deriveTitle("1984", null, generated))
+        assertEquals("1Q84", DocumentTitles.deriveTitle("1Q84", null, generated))
+        assertEquals("论语", DocumentTitles.deriveTitle("论语", null, generated))
+        // Date-shaped numerics stay rejected even from metadata.
+        assertEquals(DocumentTitles.NONE, DocumentTitles.deriveTitle("20260428", null, generated))
+        assertEquals(DocumentTitles.NONE, DocumentTitles.deriveTitle("28-04-26", null, generated))
+        // The same shapes on page 0 are page furniture, not titles.
+        assertEquals(DocumentTitles.NONE, DocumentTitles.deriveTitle(null, "1984", generated))
+        assertEquals(DocumentTitles.NONE, DocumentTitles.deriveTitle(null, "论语", generated))
     }
 
     // ── Resolution precedence ─────────────────────────────────────────────────

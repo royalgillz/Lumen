@@ -13,10 +13,14 @@ import com.artifex.mupdf.fitz.Rect
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import com.lumen.app.data.pdf.MuPdfGate
 import com.lumen.app.data.pdf.PfdSeekableStream
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Long-lived MuPDF session for the viewer.
@@ -38,6 +42,9 @@ class MuPdfPageRenderer private constructor(
     private val mutex = Mutex()
     private val pageBoundsCache: Array<SizeF?> = arrayOfNulls(pageCount)
     @Volatile private var closed = false
+    private val closeStarted = AtomicBoolean(false)
+    /** Owns the deferred native teardown in [close]; never cancelled — the destroy must run. */
+    private val closeScope = CoroutineScope(Dispatchers.IO)
 
     data class LinkInfo(
         val bounds: RectF,
@@ -48,8 +55,11 @@ class MuPdfPageRenderer private constructor(
     )
 
     /** One word of page text with its bounding box in page-pt coordinates
-     *  (origin at the page's top-left, same space as [pageSize]). */
-    data class WordBox(val text: String, val rect: RectF)
+     *  (origin at the page's top-left, same space as [pageSize]). [line] is the
+     *  word's reading-order line index within the page (structured-text line
+     *  order), so multi-word selection can union boxes and break copied text
+     *  per source line. */
+    data class WordBox(val text: String, val rect: RectF, val line: Int = 0)
 
     suspend fun pageSize(index: Int): SizeF? {
         if (index !in 0 until pageCount) return null
@@ -91,6 +101,58 @@ class MuPdfPageRenderer private constructor(
                 page.destroy()
             }
           }
+        }
+    }
+
+    /**
+     * Render a sub-rect of page [index] at full [scale] — the sharp path for
+     * oversized pages whose whole-page bitmap the caps would blur. The region
+     * is in page-local points (origin at the page bounds' top-left, the same
+     * space as [pageSize] and [WordBox.rect]). Renders patch-style: the ctm
+     * maps the whole page to device pixels and the draw device's origin is
+     * offset to the region, so only the region rasterises into the bitmap.
+     */
+    // @spec VIEW-BIG-002
+    suspend fun renderRegion(
+        index: Int,
+        scale: Float,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+    ): Bitmap? {
+        if (index !in 0 until pageCount) return null
+        if (scale <= 0f || right <= left || bottom <= top) return null
+        val w = ((right - left) * scale).toInt()
+        val h = ((bottom - top) * scale).toInt()
+        if (w < 1 || h < 1) return null
+        return MuPdfGate.withRenderPermit {
+            withDocLock {
+                val page = runCatching { doc.loadPage(index) }.getOrNull() ?: return@withDocLock null
+                try {
+                    val b: Rect = page.bounds
+                    // Page pt → device px with the page origin at (0,0), matching
+                    // the page-local space every caller uses.
+                    val ctm = Matrix(scale, 0f, 0f, scale, -b.x0 * scale, -b.y0 * scale)
+                    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    bitmap.eraseColor(android.graphics.Color.WHITE)
+                    val dev = AndroidDrawDevice(bitmap, (left * scale).toInt(), (top * scale).toInt())
+                    try {
+                        page.run(dev, ctm, null)
+                        dev.close()
+                        bitmap
+                    } catch (_: Throwable) {
+                        bitmap.recycle()
+                        null
+                    } finally {
+                        runCatching { dev.destroy() }
+                    }
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    runCatching { page.destroy() }
+                }
+            }
         }
     }
 
@@ -142,6 +204,7 @@ class MuPdfPageRenderer private constructor(
         val sb = StringBuilder()
         var minX = 0f; var minY = 0f; var maxX = 0f; var maxY = 0f
         var open = false
+        var lineIndex = 0
 
         fun flush() {
             if (open && sb.isNotEmpty()) {
@@ -149,6 +212,7 @@ class MuPdfPageRenderer private constructor(
                     WordBox(
                         text = sb.toString(),
                         rect = RectF(minX - offsetX, minY - offsetY, maxX - offsetX, maxY - offsetY),
+                        line = lineIndex,
                     )
                 )
             }
@@ -184,6 +248,7 @@ class MuPdfPageRenderer private constructor(
                     sb.appendCodePoint(cp)
                 }
                 flush()
+                lineIndex++
             }
         }
         return words
@@ -221,11 +286,23 @@ class MuPdfPageRenderer private constructor(
         } ?: emptyList()
     }
 
+    /**
+     * Idempotent and non-blocking, safe from the main thread. Flips [closed]
+     * first so no new operation starts, then destroys the native document under
+     * the [mutex] on a background coroutine — destroying concurrently with an
+     * in-flight native render would free the fz_document under it (SIGSEGV),
+     * and waiting for the mutex on the caller would block the main thread
+     * behind a long render.
+     */
     override fun close() {
-        if (closed) return
+        if (!closeStarted.compareAndSet(false, true)) return
         closed = true
-        runCatching { doc.destroy() }
-        runCatching { stream.close() }
+        closeScope.launch(NonCancellable) {
+            mutex.withLock {
+                runCatching { doc.destroy() }
+                runCatching { stream.close() }
+            }
+        }
     }
 
     private suspend fun <R> withDocLock(block: () -> R): R? {
@@ -248,13 +325,17 @@ class MuPdfPageRenderer private constructor(
         /**
          * Open the document at [uri], optionally unlocking it with [password].
          * Runs on [Dispatchers.IO]. The caller must [close] the returned
-         * renderer when done.
+         * renderer when done — on EVERY path: the block runs [NonCancellable]
+         * (it has no suspension points anyway), so a caller cancelled mid-open
+         * still receives the result instead of a thrown CancellationException
+         * silently leaking the open fd + native document; the caller checks its
+         * own liveness and closes the renderer rather than adopting it.
          */
         suspend fun open(
             context: Context,
             uri: Uri,
             password: String? = null,
-        ): OpenResult = withContext(Dispatchers.IO) {
+        ): OpenResult = withContext(Dispatchers.IO + NonCancellable) {
             val stream = try {
                 PfdSeekableStream.open(context, uri)
             } catch (t: Throwable) {

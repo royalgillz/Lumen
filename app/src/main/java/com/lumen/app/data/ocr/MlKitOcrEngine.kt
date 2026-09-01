@@ -15,10 +15,22 @@ class MlKitOcrEngine @Inject constructor() : OcrEngine {
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-    override suspend fun recognize(bitmap: Bitmap): OcrResult =
-        withTimeoutOrNull(20_000L) {
+    override suspend fun recognize(bitmap: Bitmap): OcrResult {
+        // Defensive copy: InputImage.fromBitmap does not copy, and on timeout the
+        // abandoned ML Kit task keeps running against its input while the caller
+        // recycles the original (native crash). The zombie must own an image
+        // nobody else touches; the complete listener reclaims it whenever the
+        // task eventually finishes.
+        // @spec LIB-IDX-004
+        val copy = try {
+            bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+        } catch (_: OutOfMemoryError) {
+            null
+        } ?: return OcrResult("")
+        return withTimeoutOrNull(20_000L) {
             suspendCancellableCoroutine { cont ->
-                recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                recognizer.process(InputImage.fromBitmap(copy, 0))
+                    .addOnCompleteListener { copy.recycle() }
                     .addOnSuccessListener { result ->
                         if (!cont.isActive) return@addOnSuccessListener
                         val words = ArrayList<OcrWord>()
@@ -37,4 +49,5 @@ class MlKitOcrEngine @Inject constructor() : OcrEngine {
                     .addOnFailureListener { if (cont.isActive) cont.resume(OcrResult("")) }
             }
         } ?: OcrResult("")
+    }
 }

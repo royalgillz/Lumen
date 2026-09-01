@@ -29,6 +29,9 @@ object DatabaseModule {
                 LumenDatabase.MIGRATION_8_9,
                 LumenDatabase.MIGRATION_9_10,
                 LumenDatabase.MIGRATION_10_11,
+                LumenDatabase.MIGRATION_11_12,
+                LumenDatabase.MIGRATION_12_13,
+                LumenDatabase.MIGRATION_13_14,
             )
             .fallbackToDestructiveMigration(true)
             .addCallback(object : RoomDatabase.Callback() {
@@ -52,4 +55,10 @@ object DatabaseModule {
 
     @Provides
     fun provideDocumentTitleDao(db: LumenDatabase) = db.documentTitleDao()
+
+    @Provides
+    fun provideExternalOpenDao(db: LumenDatabase) = db.externalOpenDao()
+
+    @Provides
+    fun provideRenameDao(db: LumenDatabase) = db.renameDao()
 }

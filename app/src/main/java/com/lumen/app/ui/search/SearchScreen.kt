@@ -8,6 +8,8 @@ import android.provider.DocumentsContract
 import android.content.Intent
 import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.core.RepeatMode
@@ -49,6 +51,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -72,6 +75,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Button
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -80,8 +84,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -100,15 +107,21 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.lumen.app.data.db.FtsQuerySanitizer
 import com.lumen.app.data.db.entity.DocumentEntity
+import com.lumen.app.data.fs.ExternalAccessPickerTargets
 import com.lumen.app.domain.model.DocumentTitles
 import com.lumen.app.domain.model.IndexedWithin
+import com.lumen.app.domain.model.RecentDocument
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
 import com.lumen.app.ui.common.PdfThumbnail
 import com.lumen.app.ui.common.folderDisplayName
+import com.lumen.app.ui.common.lastPageFor
 import com.lumen.app.ui.common.quantity
+import com.lumen.app.ui.common.readingProgressLabel
 import com.lumen.app.ui.icons.LumenBrandIcon
+import com.lumen.app.ui.library.LibraryDocumentSheetHost
+import com.lumen.app.ui.library.LibraryViewModel
 import com.lumen.app.ui.theme.AmberAccent
 import com.lumen.app.ui.theme.Terracotta
 
@@ -116,14 +129,25 @@ import com.lumen.app.ui.theme.Terracotta
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel = hiltViewModel(),
+    libraryViewModel: LibraryViewModel = hiltViewModel(),
     onResultClick: (uri: String, page: Int, filename: String, keyword: String, occurrence: Int) -> Unit = { _, _, _, _, _ -> },
     onOpenLibrary: () -> Unit = {},
     // The merged Documents screen appends the library body to the idle home and
     // suppresses the "Nothing indexed" prompt (its library empty state covers it).
     // @spec NAV-006
     showNoIndexPrompt: Boolean = true,
+    // false when a parent screen (merged Documents) already hosts the document
+    // detail sheet for the same nav entry — two hosts would show two sheets.
+    hostDocumentSheet: Boolean = true,
     extraIdleContent: (LazyListScope.() -> Unit)? = null,
 ) {
+    if (hostDocumentSheet) {
+        // Details from a search result's context menu lands here (LIB-REN-007).
+        LibraryDocumentSheetHost(
+            viewModel = libraryViewModel,
+            onOpenDocument = { uri, filename, page -> onResultClick(uri, page, filename, "", 0) },
+        )
+    }
     val query by viewModel.query.collectAsState()
     val customTitles by viewModel.customTitles.collectAsState()
     val results by viewModel.results.collectAsState()
@@ -134,11 +158,98 @@ fun SearchScreen(
     val isIndexing by viewModel.isIndexing.collectAsState()
     val searchHistory by viewModel.searchHistory.collectAsState()
     val recentDocuments by viewModel.recentDocuments.collectAsState()
+    val expiredKeepFile by viewModel.expiredKeepFile.collectAsState()
     val availableFolders by viewModel.availableFolders.collectAsState()
     val filters by viewModel.filters.collectAsState()
+    val lastPages by libraryViewModel.lastPages.collectAsState()
 
     var isSearchFieldFocused by remember { mutableStateOf(false) }
     var showFilterSheet by remember { mutableStateOf(false) }
+
+    // Keep-access from an expired external recents row: single-file
+    // ACTION_OPEN_DOCUMENT re-pick pre-aimed at the document's containing
+    // folder; the result routes through KeepExternalAccessUseCase (in the
+    // ViewModel) and a success opens the resulting URI. The target survives
+    // process death under the picker via rememberSaveable.
+    // @spec SEARCH-UI-012
+    var keepAccessTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    val keepAccessLauncher = rememberLauncherForActivityResult(
+        remember {
+            object : ActivityResultContracts.OpenDocument() {
+                override fun createIntent(context: Context, input: Array<String>): Intent =
+                    super.createIntent(context, input).apply {
+                        keepAccessTarget
+                            ?.let { ExternalAccessPickerTargets.containingFolderInitialUri(it) }
+                            ?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(it)) }
+                    }
+            }
+        }
+    ) { picked: Uri? ->
+        val target = keepAccessTarget
+        keepAccessTarget = null
+        if (picked != null && target != null) viewModel.onKeepAccessPicked(target, picked)
+    }
+
+    val keepAccessContext = LocalContext.current
+    LaunchedEffect(Unit) {
+        viewModel.keepAccessOutcomes.collect { outcome ->
+            when (outcome) {
+                is SearchViewModel.KeepAccessOutcome.Open ->
+                    onResultClick(outcome.uri, 0, outcome.displayName, "", 0)
+                is SearchViewModel.KeepAccessOutcome.Failed ->
+                    Toast.makeText(keepAccessContext, outcome.message, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // Live external-row taps after the readability probe: still readable opens
+    // as before; a dead transient grant goes straight to the keep-file picker
+    // (with one line of context) instead of a doomed viewer open.
+    // @spec SEARCH-UI-014
+    LaunchedEffect(Unit) {
+        viewModel.externalTaps.collect { tap ->
+            when (tap) {
+                is SearchViewModel.ExternalTap.Open ->
+                    onResultClick(tap.uri, 0, tap.displayName, "", 0)
+                is SearchViewModel.ExternalTap.NeedsKeepAccess -> {
+                    // With the keep-access surface shipped off (v1.2), the
+                    // probe still saves the doomed open — the explanation is
+                    // the whole outcome.
+                    // @spec LIB-EXT-021
+                    if (com.lumen.app.domain.model.ExternalAccessFeature.OFFERS_ENABLED) {
+                        Toast.makeText(
+                            keepAccessContext,
+                            "Access expired — pick the file to restore it",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        keepAccessTarget = tap.uri
+                        runCatching { keepAccessLauncher.launch(arrayOf("application/pdf")) }
+                            .onFailure { keepAccessTarget = null }
+                    } else {
+                        Toast.makeText(
+                            keepAccessContext,
+                            "Access expired — reopen it from the app it came from",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }
+        }
+    }
+
+    // Launcher hand-off: focus the field (bringing the IME up) when a pending
+    // search request lands. The handled id survives rotation so a config
+    // change never re-steals focus for an already-served request.
+    // @spec SEARCH-UI-008
+    val searchFieldFocusRequester = remember { FocusRequester() }
+    val focusRequestId by viewModel.focusRequests.collectAsState()
+    var handledFocusRequestId by rememberSaveable { mutableStateOf(0L) }
+    LaunchedEffect(focusRequestId) {
+        if (focusRequestId != 0L && focusRequestId != handledFocusRequestId) {
+            handledFocusRequestId = focusRequestId
+            searchFieldFocusRequester.requestFocus()
+        }
+    }
 
     val showHistory = isSearchFieldFocused && query.isBlank() && searchHistory.isNotEmpty()
     val activeFilterCount = (if (filters.folderIds.isNotEmpty()) 1 else 0) +
@@ -164,6 +275,7 @@ fun SearchScreen(
             query = query,
             indexedCount = indexedCount,
             activeFilterCount = activeFilterCount,
+            focusRequester = searchFieldFocusRequester,
             onQueryChange = { viewModel.query.value = it },
             onClearQuery = { viewModel.query.value = "" },
             onFocusChange = { isSearchFieldFocused = it },
@@ -223,10 +335,23 @@ fun SearchScreen(
                     indexedCount = indexedCount,
                     recentSearches = searchHistory,
                     recentDocuments = recentDocuments,
+                    expiredKeepFile = expiredKeepFile,
                     onSelectRecentSearch = { viewModel.query.value = it },
-                    onOpenDocument = { doc -> onResultClick(doc.uri, 0, doc.filename, "", 0) },
+                    onOpenRecent = { uri, name -> onResultClick(uri, 0, name, "", 0) },
+                    // @spec SEARCH-UI-014
+                    onOpenExternalRecent = { uri, name, persisted ->
+                        viewModel.onExternalRecentTap(uri, name, persisted)
+                    },
+                    // @spec SEARCH-UI-012
+                    onKeepAccessRequest = { docUri ->
+                        keepAccessTarget = docUri
+                        keepAccessLauncher.launch(arrayOf("application/pdf"))
+                    },
+                    // @spec SEARCH-UI-013
+                    onRemoveExternalRecent = { viewModel.removeExternalRecent(it) },
                     onOpenLibrary = onOpenLibrary,
                     customTitles = customTitles,
+                    lastPages = lastPages,
                     showNoIndexPrompt = showNoIndexPrompt,
                     extraContent = extraIdleContent,
                 )
@@ -245,12 +370,20 @@ fun SearchScreen(
                     query = query,
                     results = results,
                     isTruncated = isTruncated,
+                    // @spec LIB-REN-007
+                    onResultDetails = { result ->
+                        libraryViewModel.showDocumentDetailByUri(result.uri)
+                    },
                     onResultClick = { result ->
                         viewModel.onResultSelected(query.trim())
-                        // Filename matches have no in-text occurrence — opening with a
-                        // keyword would make the viewer hunt for a phantom highlight.
-                        val keyword = if (result.isFilenameMatch) "" else query.trim()
-                        val occurrence = if (result.isFilenameMatch) 0 else result.occurrenceOnPage
+                        // Filename and note matches have no in-text occurrence —
+                        // opening with a keyword would make the viewer hunt for a
+                        // phantom highlight (a note's words may not be on the page).
+                        // A note row still opens at the bookmark's page.
+                        // @spec SEARCH-NOTE-004
+                        val inText = !result.isFilenameMatch && !result.isNoteMatch
+                        val keyword = if (inText) query.trim() else ""
+                        val occurrence = if (inText) result.occurrenceOnPage else 0
                         onResultClick(result.uri, result.pageNumber, result.filename, keyword, occurrence)
                     },
                 )
@@ -264,6 +397,7 @@ private fun SearchHeader(
     query: String,
     indexedCount: Int?,
     activeFilterCount: Int,
+    focusRequester: FocusRequester,
     onQueryChange: (String) -> Unit,
     onClearQuery: () -> Unit,
     onFocusChange: (Boolean) -> Unit,
@@ -311,6 +445,7 @@ private fun SearchHeader(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(28.dp))
+                        .focusRequester(focusRequester)
                         .onFocusChanged { onFocusChange(it.isFocused) },
                     placeholder = { Text("Search your PDFs…") },
                     leadingIcon = {
@@ -541,6 +676,7 @@ private fun ResultList(
     results: List<SearchResult>,
     isTruncated: Boolean,
     onResultClick: (SearchResult) -> Unit,
+    onResultDetails: (SearchResult) -> Unit = {},
 ) {
     val label = if (results.size == 1) "1 result" else "${results.size} results"
     // List<Long> rather than Set: autoSaver can round-trip it through the Bundle.
@@ -572,6 +708,7 @@ private fun ResultList(
                         query = query,
                         result = entry.result,
                         onClick = { onResultClick(entry.result) },
+                        onDetails = { onResultDetails(entry.result) },
                     )
                     is ResultListEntry.DocHeader -> DocumentGroupHeader(
                         group = entry.group,
@@ -582,6 +719,7 @@ private fun ResultList(
                         result = entry.result,
                         isLastInCard = entry.isLastInCard,
                         onClick = { onResultClick(entry.result) },
+                        onDetails = { onResultDetails(entry.result) },
                     )
                     is ResultListEntry.ExpandToggle -> ExpandToggleRow(
                         expanded = entry.expanded,
@@ -709,6 +847,10 @@ private fun DocumentGroupHeader(
                                 .padding(horizontal = 5.dp, vertical = 2.dp),
                         )
                     }
+                    // @spec SEARCH-NOTE-004
+                    if (group.pages.any { it.isNoteMatch }) {
+                        NoteBadge()
+                    }
                 }
             }
         }
@@ -722,6 +864,7 @@ private fun PageMatchRow(
     result: SearchResult,
     isLastInCard: Boolean,
     onClick: () -> Unit,
+    onDetails: (() -> Unit)? = null,
 ) {
     val haptic = LocalHapticFeedback.current
     var showMenu by remember { mutableStateOf(false) }
@@ -770,6 +913,11 @@ private fun PageMatchRow(
                             .background(Terracotta.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
                             .padding(horizontal = 6.dp, vertical = 2.dp),
                     )
+                    // The snippet is the user's own bookmark note, not page text.
+                    // @spec SEARCH-NOTE-004
+                    if (result.isNoteMatch) {
+                        NoteBadge()
+                    }
                     Text(
                         text = buildHighlightedSnippet(
                             snippet = result.snippet,
@@ -805,6 +953,7 @@ private fun PageMatchRow(
             expanded = showMenu,
             onDismiss = { showMenu = false },
             onOpen = onClick,
+            onDetails = onDetails,
         )
     }
 }
@@ -842,12 +991,30 @@ private fun ExpandToggleRow(
     }
 }
 
+// The OCR chip's visual, badging rows whose match lives in a bookmark note
+// rather than page content.
+// @spec SEARCH-NOTE-004
+@Composable
+private fun NoteBadge() {
+    Text(
+        text = "note",
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 0.5.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ResultRow(
     query: String,
     result: SearchResult,
     onClick: () -> Unit = {},
+    onDetails: (() -> Unit)? = null,
 ) {
     val haptic = LocalHapticFeedback.current
     var showMenu by remember { mutableStateOf(false) }
@@ -964,6 +1131,11 @@ fun ResultRow(
                                 .padding(horizontal = 5.dp, vertical = 2.dp),
                         )
                     }
+                    // @spec SEARCH-NOTE-004
+                    if (result.isNoteMatch) {
+                        Spacer(Modifier.height(5.dp))
+                        NoteBadge()
+                    }
                 }
             }
         }
@@ -973,16 +1145,21 @@ fun ResultRow(
             expanded = showMenu,
             onDismiss = { showMenu = false },
             onOpen = onClick,
+            onDetails = onDetails,
         )
     }
 }
 
+// Long-press menu on every search result row — one definition, so it holds on
+// the dedicated Search screen and the merged Documents screen alike.
+// @spec SEARCH-UI-009
 @Composable
 private fun SnippetContextMenu(
     result: SearchResult,
     expanded: Boolean,
     onDismiss: () -> Unit,
     onOpen: () -> Unit,
+    onDetails: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     DropdownMenu(
@@ -997,11 +1174,26 @@ private fun SnippetContextMenu(
                 onOpen()
             },
         )
+        if (onDetails != null) {
+            // Opens the shared document detail sheet (rename lives there).
+            // @spec LIB-REN-007
+            DropdownMenuItem(
+                text = { Text("Details") },
+                leadingIcon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                    onDismiss()
+                    onDetails()
+                },
+            )
+        }
         DropdownMenuItem(
             text = { Text("Copy snippet") },
             leadingIcon = { Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(18.dp)) },
             onClick = {
                 onDismiss()
+                // Plain snippet text, verbatim — the highlight styling is
+                // render-only markup (SEARCH-SNIP-002).
+                // @spec SEARCH-UI-009
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("Lumen snippet", result.snippet))
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
@@ -1010,12 +1202,14 @@ private fun SnippetContextMenu(
             },
         )
         DropdownMenuItem(
-            text = { Text("Share") },
+            text = { Text("Share snippet") },
             leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
             onClick = {
                 onDismiss()
-                // @spec SEARCH-UI-006
-                val text = "${result.displayTitle} · p.${result.pageNumber + 1}\n\n${result.snippet}"
+                // Quoted snippet + attribution, so the pasted text stays
+                // self-identifying wherever it lands.
+                // @spec SEARCH-UI-006, SEARCH-UI-010
+                val text = "“${result.snippet}”\n— ${result.displayTitle}, p. ${result.pageNumber + 1}"
                 context.startActivity(
                     Intent.createChooser(
                         Intent(Intent.ACTION_SEND).apply {
@@ -1211,11 +1405,17 @@ private fun ActiveFiltersRow(
 private fun SearchEmptyState(
     indexedCount: Int?,
     recentSearches: List<String>,
-    recentDocuments: List<DocumentEntity>,
+    recentDocuments: List<RecentDocument>,
+    expiredKeepFile: Map<String, Boolean>,
     onSelectRecentSearch: (String) -> Unit,
-    onOpenDocument: (DocumentEntity) -> Unit,
+    onOpenRecent: (uri: String, filename: String) -> Unit,
+    // Live external rows route through the readability probe (SEARCH-UI-014).
+    onOpenExternalRecent: (docUri: String, displayName: String, persisted: Boolean) -> Unit,
+    onKeepAccessRequest: (docUri: String) -> Unit,
+    onRemoveExternalRecent: (docUri: String) -> Unit,
     onOpenLibrary: () -> Unit,
     customTitles: Map<String, String> = emptyMap(),
+    lastPages: Map<String, Int> = emptyMap(),
     showNoIndexPrompt: Boolean = true,
     extraContent: (LazyListScope.() -> Unit)? = null,
 ) {
@@ -1312,12 +1512,42 @@ private fun SearchEmptyState(
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
                 )
             }
-            items(recentDocuments, key = { it.id }) { doc ->
-                RecentDocumentRow(
-                    doc = doc,
-                    displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
-                    onClick = { onOpenDocument(doc) },
-                )
+            items(
+                recentDocuments,
+                key = { recent ->
+                    when (recent) {
+                        is RecentDocument.Library -> "lib:${recent.document.id}"
+                        is RecentDocument.External -> "ext:${recent.docUri}"
+                    }
+                },
+            ) { recent ->
+                when (recent) {
+                    is RecentDocument.Library -> {
+                        val doc = recent.document
+                        RecentDocumentRow(
+                            doc = doc,
+                            displayTitle = DocumentTitles.displayTitle(customTitles[doc.uri], doc.derivedTitle, doc.filename),
+                            progressLabel = lastPageFor(lastPages, doc.uri)
+                                ?.let { readingProgressLabel(it, doc.pageCount) },
+                            onClick = { onOpenRecent(doc.uri, doc.filename) },
+                        )
+                    }
+                    // @spec SEARCH-UI-007, SEARCH-UI-011
+                    is RecentDocument.External -> ExternalRecentRow(
+                        docUri = recent.docUri,
+                        displayName = recent.displayName,
+                        expired = recent.accessLost,
+                        keepFilePickApplies = expiredKeepFile[recent.docUri] == true,
+                        // Live rows probe first (SEARCH-UI-014): a transient
+                        // grant that died silently must not burn the tap on the
+                        // viewer's error screen.
+                        onClick = {
+                            onOpenExternalRecent(recent.docUri, recent.displayName, recent.persisted)
+                        },
+                        onKeepAccess = { onKeepAccessRequest(recent.docUri) },
+                        onRemove = { onRemoveExternalRecent(recent.docUri) },
+                    )
+                }
             }
         }
 
@@ -1337,7 +1567,12 @@ private fun SearchEmptyState(
 }
 
 @Composable
-private fun RecentDocumentRow(doc: DocumentEntity, displayTitle: String, onClick: () -> Unit) {
+private fun RecentDocumentRow(
+    doc: DocumentEntity,
+    displayTitle: String,
+    progressLabel: String?,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1376,10 +1611,124 @@ private fun RecentDocumentRow(doc: DocumentEntity, displayTitle: String, onClick
                 )
             }
             Text(
-                // @spec LIB-PLU-001
-                text = quantity(doc.pageCount, "page"),
+                // Continue-reading framing when a position exists; the plain
+                // page count otherwise.
+                // @spec LIB-PRG-003, LIB-PLU-001
+                text = progressLabel?.let { "Continue reading · $it" }
+                    ?: quantity(doc.pageCount, "page"),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (progressLabel != null) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+    }
+}
+
+/**
+ * A recently-opened row for an external VIEW-intent open: stored display name,
+ * a "From another app" caption in place of a folder path, best-effort thumbnail
+ * (placeholder once the grant has died), opens at page 0.
+ *
+ * Access-loss honesty: an [expired] row (dead transient grant) renders muted
+ * with an honest caption instead of vanishing. When the keep-file re-pick
+ * applies, tapping opens the keep-access picker instead of a doomed open
+ * attempt; otherwise the tap stays a normal open (the viewer's access-loss
+ * surface owns the folder-based escape hatches). Expired rows are removable
+ * via long-press. Reading position is untouched by expiry — it survives for a
+ * later successful reopen by design.
+ */
+// @spec SEARCH-UI-007, SEARCH-UI-011, SEARCH-UI-012, SEARCH-UI-013
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ExternalRecentRow(
+    docUri: String,
+    displayName: String,
+    expired: Boolean,
+    keepFilePickApplies: Boolean,
+    onClick: () -> Unit,
+    onKeepAccess: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    var showMenu by remember { mutableStateOf(false) }
+    val tapAction = externalRecentTapAction(expired, keepFilePickApplies)
+
+    Box {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = {
+                        when (tapAction) {
+                            ExternalRecentTap.KEEP_ACCESS_PICKER -> onKeepAccess()
+                            ExternalRecentTap.OPEN -> onClick()
+                        }
+                    },
+                    onLongClick = if (expired) {
+                        {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            showMenu = true
+                        }
+                    } else null,
+                )
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(width = 36.dp, height = 48.dp)
+                    .alpha(if (expired) 0.45f else 1f)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(6.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                PdfThumbnail(
+                    uriString = docUri,
+                    pageIndex = 0,
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (expired) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onBackground
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = externalRecentCaption(expired, keepFilePickApplies),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (expired) {
+                        MaterialTheme.colorScheme.outline
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        // @spec SEARCH-UI-013
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("Remove from recents") },
+                leadingIcon = { Icon(Icons.Default.Clear, null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                    showMenu = false
+                    onRemove()
+                },
             )
         }
     }
@@ -1468,7 +1817,9 @@ private fun buildHighlightedSnippet(
     append("“")
     var i = 0
     for (range in highlights) {
-        val start = range.first.coerceIn(0, snippet.length)
+        // Ranges arrive merged and disjoint (SEARCH-SNIP-004); clamping the
+        // start to the cursor keeps an unmerged overlap from re-emitting text.
+        val start = range.first.coerceIn(i, snippet.length)
         val endExclusive = (range.last + 1).coerceIn(start, snippet.length)
         if (start > i) append(snippet.substring(i, start))
         withStyle(SpanStyle(color = highlightTextColor, fontWeight = FontWeight.SemiBold, background = highlightColor)) {

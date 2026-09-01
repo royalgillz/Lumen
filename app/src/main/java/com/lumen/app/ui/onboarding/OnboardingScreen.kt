@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.ui.common.FolderQuickPickRow
 import com.lumen.app.ui.icons.FolderIcon
 import com.lumen.app.ui.icons.LumenBrandIcon
 import com.lumen.app.ui.icons.PrivacyIcon
@@ -155,6 +156,12 @@ fun OnboardingScreen(
                 currentPage = page,
                 isIndexing = isIndexing,
                 indexingProgress = indexingProgress,
+                // Quick-picks land the SAF picker at the folder; the "Pick
+                // folder" button below stays as the generic affordance.
+                // @spec LIB-QPK-001
+                onPickFolder = if (page == 1) {
+                    { uri -> folderPickerLauncher.launch(uri) }
+                } else null,
             )
         }
 
@@ -257,6 +264,7 @@ private fun PageContent(
     currentPage: Int,
     isIndexing: Boolean = false,
     indexingProgress: Pair<Int, Int>? = null,
+    onPickFolder: ((Uri?) -> Unit)? = null,
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -325,6 +333,14 @@ private fun PageContent(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             )
+        }
+
+        if (onPickFolder != null) {
+            Spacer(Modifier.height(14.dp))
+            // The "Pick folder" button below is the generic affordance, so the
+            // row skips its own choose-anywhere chip.
+            // @spec LIB-QPK-001, LIB-QPK-002
+            FolderQuickPickRow(onPick = onPickFolder, showChooseFolder = false)
         }
 
         if (currentPage == 2) {

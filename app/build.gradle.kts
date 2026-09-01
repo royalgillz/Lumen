@@ -20,8 +20,8 @@ android {
         applicationId = "io.github.royalgillz.lumen"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.1"
+        versionCode = 7
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -63,6 +63,19 @@ android {
     sourceSets {
         // MigrationTestHelper reads exported Room schemas as instrumentation assets.
         getByName("androidTest").assets.srcDir("$projectDir/schemas")
+    }
+    testOptions {
+        // Robolectric-driven Compose tests (navigation layout switch) need
+        // real Android resources on the unit-test classpath.
+        unitTests {
+            isIncludeAndroidResources = true
+            all {
+                // This machine's HTTPS is TLS-intercepted; Robolectric downloads
+                // its android-all jar from the test JVM, which needs the Windows
+                // trust store just like the Gradle daemon does.
+                it.systemProperty("javax.net.ssl.trustStoreType", "WINDOWS-ROOT")
+            }
+        }
     }
 }
 
@@ -125,6 +138,10 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation(libs.androidx.compose.ui.test.manifest)
+    testImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -57,7 +57,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -81,14 +80,22 @@ import com.lumen.app.ui.icons.TrashIcon
 import com.lumen.app.ui.theme.Terracotta
 
 @Composable
-fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-    var folderPendingRemoval by remember { mutableStateOf<Uri?>(null) }
+fun SettingsScreen(
+    // The layout the navigation host has applied — the toggle's selected state
+    // derives from it, never from a flow that can replay a stale value while a
+    // switch is rebuilding the graph.
+    // @spec NAV-010
+    appliedNavLayout: NavLayoutMode = NavLayoutMode.THREE_TAB,
+    viewModel: SettingsViewModel = hiltViewModel(),
+) {
+    // Saveable so confirmation dialogs survive rotation; the Uri rides as a string.
+    // @spec SET-DATA-002
+    var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+    var folderPendingRemoval by rememberSaveable { mutableStateOf<String?>(null) }
     val haptic = LocalHapticFeedback.current
     val folders by viewModel.folders.collectAsState()
     val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
-    val navLayout by viewModel.navLayout.collectAsState()
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -96,7 +103,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         uri?.let { viewModel.addFolder(it) }
     }
 
-    val removalTarget = folderPendingRemoval
+    val removalTarget = folderPendingRemoval?.let(Uri::parse)
     if (removalTarget != null) {
         AlertDialog(
             onDismissRequest = { folderPendingRemoval = null },
@@ -130,8 +137,9 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             title = { Text("Delete search index?") },
             text = {
                 Text(
-                    "All indexed content will be removed. Your PDF files are not affected. " +
-                        "You can re-index at any time from the Library."
+                    // @spec LIB-REC-006
+                    "All indexed content and your recently-opened history will be removed. " +
+                        "Your PDF files are not affected. You can re-index at any time from the Library."
                 )
             },
             confirmButton = {
@@ -200,7 +208,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         SectionLabel("Appearance")
         AppearanceCard(
             themeMode = themeMode,
-            navLayout = navLayout,
+            navLayout = appliedNavLayout,
             onThemeChange = { viewModel.setThemeMode(it) },
             onNavLayoutChange = { viewModel.setNavLayout(it) },
         )
@@ -218,7 +226,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             lostPermissionFolders = lostPermissionFolders,
             onAddFolder = { folderPickerLauncher.launch(null) },
             onReindexFolder = { viewModel.reindexFolder(it) },
-            onRemoveFolder = { folderPendingRemoval = it },
+            onRemoveFolder = { folderPendingRemoval = it.toString() },
         )
         Spacer(Modifier.height(16.dp))
 
@@ -376,7 +384,8 @@ private fun DataCard(onDeleteIndex: () -> Unit) {
             Text("Search Index", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(6.dp))
             Text(
-                "Deletes all indexed text from your PDFs. Your actual PDF files are not affected. " +
+                "Deletes all indexed text from your PDFs and clears your recently-opened history. " +
+                    "Your actual PDF files are not affected. " +
                     "You can re-index any folder from the Library tab.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

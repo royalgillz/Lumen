@@ -16,6 +16,7 @@ class MergeForReindexTest {
         indexedAt = 2_000L,
         lastOpenedAt = 3_000L,
         derivedTitle = "Old Title",
+        author = "Jane Doe",
     )
 
     private val fresh = DocumentEntity(
@@ -45,12 +46,42 @@ class MergeForReindexTest {
         val merged = mergeForReindex(existing, fresh)
         assertEquals(5, merged.pageCount)
         assertEquals(8_000L, merged.indexedAt)
-        assertEquals("New Title", merged.derivedTitle)
+    }
+
+    // The merge runs before extraction: carrying the last-known title means a
+    // failed, cancelled, or timed-out pass can't blank it (and can't invite
+    // the page-0 backfill to stamp a worse guess); a successful pass
+    // overwrites it post-extraction.
+    // @spec LIB-TTL-012
+    @Test
+    fun carriesLastKnownDerivedTitleThroughTheUpsert() {
+        assertEquals(existing.derivedTitle, mergeForReindex(existing, fresh).derivedTitle)
     }
 
     // @spec LIB-TTL-009
     @Test
     fun noExistingRow_freshWinsUnchanged() {
         assertEquals(fresh, mergeForReindex(null, fresh))
+    }
+
+    // The merge runs before extraction, so the fresh entity's null author must
+    // not blank the last-known value; the post-extraction write owns it.
+    // @spec LIB-TTL-012
+    @Test
+    fun carriesLastKnownAuthorThroughTheUpsert() {
+        assertEquals("Jane Doe", mergeForReindex(existing, fresh).author)
+    }
+
+    // The TTL is ownership state managed only by setEphemeralExpiry /
+    // the purge / the adoption-drop paths: a re-index pass must neither promote an
+    // ephemeral doc (fresh null must not clear the TTL) nor demote a library
+    // one.
+    // @spec LIB-EXT-003
+    @Test
+    fun carriesEphemeralExpiryThroughTheUpsert() {
+        val ephemeral = existing.copy(ephemeralExpiresAt = 7_777L)
+        assertEquals(7_777L, mergeForReindex(ephemeral, fresh).ephemeralExpiresAt)
+        // And a permanent doc stays permanent.
+        assertEquals(null, mergeForReindex(existing, fresh).ephemeralExpiresAt)
     }
 }

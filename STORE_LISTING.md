@@ -39,8 +39,7 @@ No internet. No accounts. No tracking. Lumen has NO internet permission at all �
 • Find text in scanned PDFs — built-in offline OCR reads scanned and image-only documents so you can search them too
 • Jump to the exact page — every result links to the page and highlights the match inside the built-in PDF viewer
 • 100% offline — works on a plane, in a basement, anywhere, with zero signal
-• Truly private — no internet permission, no analytics, no ads, no data
-  collection of any kind
+• Truly private — no internet permission, no analytics, no ads, no data collection of any kind
 • Fast — results appear as you type, even across hundreds of documents
 • Lightweight on storage — Lumen never copies your PDFs; it reads them in place
 
@@ -48,8 +47,7 @@ No internet. No accounts. No tracking. Lumen has NO internet permission at all �
 
 1. Pick a folder of PDFs (Storage Access Framework — your files stay where they are)
 2. Lumen indexes the text on every page in the background
-3. Search any word or phrase and get filename + page number + highlighted
-   snippet results
+3. Search any word or phrase and get filename + page number + highlighted snippet results
 4. Tap to open the PDF at the right page with the match highlighted
 
 — PERFECT FOR —
@@ -89,8 +87,7 @@ Keywords: PDF search, search PDF, find text in PDF, offline PDF reader, full tex
 5. Onboarding / "100% offline" hero
 6. (optional) Filters / OCR result on a scanned doc
 
-Add a one-line caption banner on each screenshot (e.g. "Find any word in seconds",
-"Works 100% offline", "Your files never leave your phone").
+Add a one-line caption banner on each screenshot (e.g. "Find any word in seconds", "Works 100% offline", "Your files never leave your phone").
 
 ---
 
@@ -111,8 +108,7 @@ Add a one-line caption banner on each screenshot (e.g. "Find any word in seconds
 
 ## Content rating questionnaire
 - Category: Utility / Productivity
-- No violence, sexual content, profanity, gambling, user-generated content,
-  or sharing of location/personal info → expected rating: **Everyone / PEGI 3**
+- No violence, sexual content, profanity, gambling, user-generated content, or sharing of location/personal info → expected rating: **Everyone / PEGI 3**
 
 ## Other declarations
 - Ads: **No, this app contains no ads**

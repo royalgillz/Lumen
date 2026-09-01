@@ -18,11 +18,14 @@ class PdfTextExtractor @Inject constructor(
     /**
      * Opens the document once and calls [onPage] for each page (0-indexed).
      * Uses startPage/endPage so only one page is loaded into memory at a time,
-     * never calls getText() on the whole document.
+     * never calls getText() on the whole document. [onMetadata] delivers the
+     * document-information Title and Author from the same open — absent or
+     * unreadable metadata yields nulls, never a failed pass.
      */
+    // @spec LIB-TTL-012
     suspend fun extractAll(
         uri: Uri,
-        onMetadataTitle: (String?) -> Unit = {},
+        onMetadata: (title: String?, author: String?) -> Unit = { _, _ -> },
         onPage: suspend (pageIndex: Int, text: String) -> Unit,
     ): Outcome {
         val inputStream = context.contentResolver.openInputStream(uri)
@@ -30,7 +33,10 @@ class PdfTextExtractor @Inject constructor(
         return try {
             inputStream.use { stream ->
                 PDDocument.load(stream).use { doc ->
-                    onMetadataTitle(runCatching { doc.documentInformation?.title }.getOrNull())
+                    onMetadata(
+                        runCatching { doc.documentInformation?.title }.getOrNull(),
+                        runCatching { doc.documentInformation?.author }.getOrNull(),
+                    )
                     val stripper = PDFTextStripper()
                     repeat(doc.numberOfPages) { i ->
                         stripper.startPage = i + 1

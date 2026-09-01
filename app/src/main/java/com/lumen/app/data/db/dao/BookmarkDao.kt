@@ -28,6 +28,38 @@ interface BookmarkDao {
 
     @Query("DELETE FROM bookmarks WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    // Notes live outside both FTS tables; search matches them in Kotlin
+    // (SearchRepository), so the SQL only narrows to non-blank notes on
+    // library documents passing the folder / indexed-within filters. Inner
+    // join by design: a note on a never-indexed external open has no folder,
+    // title, or docId to build a result row from.
+    // @spec SEARCH-NOTE-001
+    @Query("""
+        SELECT b.id AS bookmarkId, b.docUri, b.pageNumber, b.note,
+               d.id AS docId, d.filename, d.treeUri, d.indexedAt,
+               d.derivedTitle, dt.title AS customTitle
+        FROM bookmarks b
+        JOIN documents d ON d.uri = b.docUri
+        LEFT JOIN document_titles dt ON dt.docUri = d.uri
+        WHERE b.note IS NOT NULL AND TRIM(b.note) != ''
+          AND (:filterByFolder = 0 OR d.treeUri IN (:treeUris))
+          AND (:minIndexedAt = 0 OR d.indexedAt >= :minIndexedAt)
+    """)
+    suspend fun noteSearchRows(filterByFolder: Int, treeUris: List<String>, minIndexedAt: Long): List<NoteSearchRow>
 }
 
 data class BookmarkDocCount(val docUri: String, val count: Int)
+
+data class NoteSearchRow(
+    val bookmarkId: Long,
+    val docUri: String,
+    val pageNumber: Int,
+    val note: String,
+    val docId: Long,
+    val filename: String,
+    val treeUri: String,
+    val indexedAt: Long?,
+    val derivedTitle: String?,
+    val customTitle: String?,
+)
