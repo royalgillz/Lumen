@@ -151,10 +151,22 @@ development happens on the `develop` branch.
 
 | Version | Tag | Highlights |
 |---|---|---|
+| **1.2** | `v1.2` | Exact-phrase search with quotes and searchable bookmark notes, multi-word text selection in the viewer, embedded PDF metadata titles and author (DB v14), reading progress on recents and library cards, rename-the-file-on-device, file location with open-folder shortcut in document details, a 2-tab merged layout option with a seamless switch, launcher shortcuts / search widget / "Search in Lumen" on selected text, folder quick-picks in onboarding, sharp rendering and working OCR for very tall single-page PDFs, and a large stability pass across rename, indexing, and viewer lifecycle. |
 | **1.1** | `v1.1` | Page-level FTS index (DB v7) with relevance ranking and grouped results, search filters (folders, OCR-only, sort, indexed date) with always-visible reset, incremental rescan, viewer zoom pill with live percentage, print and save-a-copy, notification permission flow, and release signing under the new `io.github.royalgillz.lumen` application ID. |
 | **1.0** | `v1.0` | First complete build — offline FTS4 full-text search, MuPDF PDF viewer with occurrence-level in-document search and keyword highlighting, OCR highlight boxes for scanned pages, Drive-style fast-scroll thumb, device-aware viewer memory bounds, and the privacy-first Library/Settings design. |
 
 ### Changelog
+
+**1.2**
+- Search: exact phrases with double quotes ("invoice 4471" means those words together), bookmark notes included in results with a note badge, consistent counts and highlights for phrase matches
+- Viewer: multi-word text selection with drag handles and copy/share, sharp region rendering for very tall single-page pages (scanned notes exports), password retry feedback, resume and highlight fixes
+- Library: rename can now also rename the file on device (with safe two-step case-only renames), document details show pages/size/author and the file's location with an open-folder shortcut, reading progress ("p. 34 of 120 · 28%") on recents and cards
+- Titles: embedded PDF metadata title and author feed the display-title pipeline through a junk-filtering gate (DB v13/v14)
+- Navigation: optional 2-tab merged Documents layout with an instant, flicker-free switch; back handling keeps the bar's home consistent in both modes
+- Getting started: Downloads/Documents quick-pick chips in onboarding and the empty library
+- Launcher: static Search shortcut, home-screen search widget, "Search in Lumen" on text selected anywhere, and recent documents as app-icon shortcuts
+- Very tall pages now index correctly via strip-based OCR with accurate search highlights
+- Stability: dozens of fixes across rename, folder removal, index wipe atomicity, viewer render lifecycle, and search-result snippets
 
 **1.1**
 - Search rebuilt on a page-level FTS index (DB v7): results grouped by document with per-page hit counts, relevance ranking with filename boost, fixed AND-literal queries
