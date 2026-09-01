@@ -18,4 +18,13 @@ package com.lumen.app.domain.model
 // @spec LIB-EXT-021
 object ExternalAccessFeature {
     const val OFFERS_ENABLED = false
+
+    /** External opens on the recently-opened list ship with the offer surface:
+     *  without the recovery flows, a row whose transient grant died is a dead
+     *  item with only an apology — v1.1 never showed external recents, so
+     *  hiding them regresses nothing store users have seen. Recording (rows,
+     *  grants, hygiene) continues underneath; only the display is gated, so
+     *  re-enabling restores history seamlessly. */
+    // @spec LIB-EXT-021
+    const val SHOW_EXTERNAL_RECENTS = OFFERS_ENABLED
 }

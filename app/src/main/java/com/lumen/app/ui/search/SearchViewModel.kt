@@ -108,7 +108,15 @@ class SearchViewModel @Inject constructor(
     val recentDocuments: StateFlow<List<RecentDocument>> = combine(
         documentDao.observeRecentlyOpened(8),
         externalOpenDao.observeRecent(8),
-    ) { library, external -> mergeRecents(library, external) }
+    ) { library, external ->
+        // External rows ship with the offer surface (v1.2: hidden) — the rows
+        // keep recording underneath for a seamless v1.3 return.
+        // @spec LIB-EXT-021
+        val shownExternal =
+            if (com.lumen.app.domain.model.ExternalAccessFeature.SHOW_EXTERNAL_RECENTS) external
+            else emptyList()
+        mergeRecents(library, shownExternal)
+    }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /**
