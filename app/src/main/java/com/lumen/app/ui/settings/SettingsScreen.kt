@@ -87,6 +87,10 @@ fun SettingsScreen(
     // switch is rebuilding the graph.
     // @spec NAV-010
     appliedNavLayout: NavLayoutMode = NavLayoutMode.THREE_TAB,
+    // Debug builds only — the eval route this opens is never registered in
+    // release, so the default no-op is what release call sites keep.
+    // @spec SEARCH-EVAL-001
+    onOpenEval: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     // Saveable so confirmation dialogs survive rotation; the Uri rides as a string.
@@ -244,6 +248,7 @@ fun SettingsScreen(
             DebugCard(
                 scorerVariant = scorerVariant,
                 onScorerVariantChange = { viewModel.setScorerVariant(it) },
+                onOpenEval = onOpenEval,
             )
             Spacer(Modifier.height(24.dp))
         }
@@ -278,6 +283,7 @@ private fun SectionLabel(text: String) {
 private fun DebugCard(
     scorerVariant: ScorerVariant,
     onScorerVariantChange: (ScorerVariant) -> Unit,
+    onOpenEval: () -> Unit,
 ) {
     Surface(
         modifier = Modifier
@@ -307,6 +313,20 @@ private fun DebugCard(
                     ) { Text(label) }
                 }
             }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "Search eval",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenEval)
+                    .padding(vertical = 8.dp),
+            )
+            Text(
+                "Run a query set against the index and score each ranking variant.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

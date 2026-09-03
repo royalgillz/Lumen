@@ -31,6 +31,7 @@ class SafRepository @Inject constructor(
         private val KEY_FILTER_OCR_ONLY = booleanPreferencesKey("filter_ocr_only")
         private val KEY_FILTER_SORT_ORDER = stringPreferencesKey("filter_sort_order")
         private val KEY_DEBUG_SCORER_VARIANT = stringPreferencesKey("debug_scorer_variant")
+        private val KEY_EVAL_SET_URI = stringPreferencesKey("eval_set_uri")
         private val KEY_LIBRARY_SORT_ORDER = stringPreferencesKey("library_sort_order")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         private val KEY_NAV_LAYOUT = stringPreferencesKey("nav_layout")
@@ -246,6 +247,17 @@ class SafRepository @Inject constructor(
 
     suspend fun saveDebugScorerVariant(name: String) {
         dataStore.edit { it[KEY_DEBUG_SCORER_VARIANT] = name }
+    }
+
+    /** Debug-build evaluation-set file URI (SAF grant persisted separately by
+     *  the picker). Release builds never read this. */
+    // @spec SEARCH-EVAL-003
+    val evalSetUri: Flow<String?> = dataStore.data.map { prefs ->
+        prefs[KEY_EVAL_SET_URI]
+    }
+
+    suspend fun saveEvalSetUri(uri: String) {
+        dataStore.edit { it[KEY_EVAL_SET_URI] = uri }
     }
 
     val savedFilterSortOrder: Flow<String> = dataStore.data.map { prefs ->

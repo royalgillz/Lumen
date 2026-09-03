@@ -33,8 +33,10 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.BuildConfig
 import com.lumen.app.domain.model.PendingSearch
 import com.lumen.app.ui.documents.DocumentsScreen
+import com.lumen.app.ui.eval.EvalScreen
 import com.lumen.app.ui.library.LibraryScreen
 import com.lumen.app.ui.onboarding.OnboardingScreen
 import com.lumen.app.ui.onboarding.OnboardingViewModel
@@ -52,6 +54,9 @@ sealed class Screen(val route: String) {
     data object Documents : Screen("documents")
     data object Settings : Screen("settings")
     data object PdfViewer : Screen("pdf_viewer")
+
+    /** Debug builds only — never registered in release. @spec SEARCH-EVAL-001 */
+    data object Eval : Screen("eval")
 }
 
 private const val PDF_VIEWER_ROUTE =
@@ -319,7 +324,21 @@ private fun LumenScaffold(
             // The applied layout mode drives the Navigation toggle's selected
             // state — the graph's own value can never go stale mid-switch.
             // @spec NAV-010
-            composable(Screen.Settings.route) { SettingsScreen(appliedNavLayout = layoutMode) }
+            composable(Screen.Settings.route) {
+                SettingsScreen(
+                    appliedNavLayout = layoutMode,
+                    onOpenEval = { navController.navigate(Screen.Eval.route) },
+                )
+            }
+            // One registration serves both layout modes (NAV-002 parity); the
+            // route — and with it the whole eval surface — exists only in
+            // debug builds.
+            // @spec SEARCH-EVAL-001
+            if (BuildConfig.DEBUG) {
+                composable(Screen.Eval.route) {
+                    EvalScreen(onBack = { navController.popBackStack() })
+                }
+            }
             composable(
                 route = PDF_VIEWER_ROUTE,
                 arguments = listOf(

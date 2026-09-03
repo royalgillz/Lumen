@@ -71,6 +71,12 @@ interface DocumentDao {
     @Query("SELECT COUNT(*) FROM documents WHERE status = 'indexed' AND ephemeralExpiresAt IS NULL")
     suspend fun countIndexed(): Int
 
+    // Same predicate as countIndexed so the eval corpus stamp's two numbers
+    // reconcile with each other and with every other indexed count.
+    // @spec SEARCH-EVAL-008
+    @Query("SELECT MAX(indexedAt) FROM documents WHERE status = 'indexed' AND ephemeralExpiresAt IS NULL")
+    suspend fun maxIndexedAt(): Long?
+
     // @spec LIB-EXT-003
     @Query("SELECT COUNT(*) FROM documents WHERE status = 'indexed' AND ephemeralExpiresAt IS NULL")
     fun observeIndexedCount(): Flow<Int>
