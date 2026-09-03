@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.compose.ui.text.style.TextOverflow
 import com.lumen.app.BuildConfig
+import com.lumen.app.domain.model.ScorerVariant
 import com.lumen.app.ui.common.folderDisplayName
 import com.lumen.app.ui.navigation.NavLayoutMode
 import com.lumen.app.ui.theme.ThemeMode
@@ -96,6 +97,7 @@ fun SettingsScreen(
     val folders by viewModel.folders.collectAsState()
     val lostPermissionFolders by viewModel.lostPermissionFolders.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
+    val scorerVariant by viewModel.scorerVariant.collectAsState()
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -234,6 +236,18 @@ fun SettingsScreen(
         AboutCard()
         Spacer(Modifier.height(24.dp))
 
+        // Debug-only: ranking scorer A/B toggle. Never present in release
+        // builds — release always ranks with the production default.
+        // @spec SEARCH-RANK-007
+        if (BuildConfig.DEBUG) {
+            SectionLabel("Debug")
+            DebugCard(
+                scorerVariant = scorerVariant,
+                onScorerVariantChange = { viewModel.setScorerVariant(it) },
+            )
+            Spacer(Modifier.height(24.dp))
+        }
+
         Text(
             text = "Lumen collects no data. No network requests. Ever.",
             style = MaterialTheme.typography.bodySmall,
@@ -259,6 +273,44 @@ private fun SectionLabel(text: String) {
 // three mutually exclusive options are clearest side by side. Persisted and
 // applied immediately — the user watches the bottom bar change under them.
 // @spec SET-APPEAR-001
+/** Debug builds only (see the BuildConfig.DEBUG gate at the call site). */
+@Composable
+private fun DebugCard(
+    scorerVariant: ScorerVariant,
+    onScorerVariantChange: (ScorerVariant) -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 1.dp,
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Search ranking", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "A/B the content-lane scorer. Release builds always use BM25.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                val options = listOf(
+                    ScorerVariant.CURRENT to "Hit count",
+                    ScorerVariant.BM25 to "BM25",
+                )
+                options.forEachIndexed { index, (variant, label) ->
+                    SegmentedButton(
+                        selected = scorerVariant == variant,
+                        onClick = { onScorerVariantChange(variant) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                    ) { Text(label) }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AppearanceCard(
     themeMode: ThemeMode,

@@ -15,6 +15,7 @@ import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.repository.LibraryRepository
 import com.lumen.app.di.ApplicationScope
 import com.lumen.app.domain.model.ExternalOpensGate
+import com.lumen.app.domain.model.ScorerVariant
 import com.lumen.app.ui.navigation.NavLayoutMode
 import com.lumen.app.ui.theme.ThemeMode
 import com.lumen.app.domain.usecase.AddFolderUseCase
@@ -60,6 +61,17 @@ class SettingsViewModel @Inject constructor(
     // No navLayout read flow here: the Navigation toggle's selected state comes
     // from the applied mode the navigation host passes down (NAV-010) — a flow
     // recreated mid-switch would replay a stale initial and snap the toggle back.
+
+    // Debug-only ranking scorer (row rendered only in debug builds; release
+    // builds ignore the preference entirely).
+    // @spec SEARCH-RANK-007
+    val scorerVariant: StateFlow<ScorerVariant> = safRepository.debugScorerVariant
+        .map { ScorerVariant.fromPref(it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ScorerVariant.DEFAULT)
+
+    fun setScorerVariant(variant: ScorerVariant) {
+        viewModelScope.launch { safRepository.saveDebugScorerVariant(variant.name) }
+    }
 
     fun setThemeMode(mode: ThemeMode) {
         viewModelScope.launch { safRepository.saveThemeMode(mode.name) }

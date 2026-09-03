@@ -11,34 +11,44 @@ import com.lumen.app.data.db.dao.PageTextDao
 import com.lumen.app.data.text.NormalizedMatcher
 import com.lumen.app.data.text.SnippetBuilder
 import com.lumen.app.data.text.TextNormalizer
+import com.lumen.app.di.ComputeDispatcher
 import com.lumen.app.domain.model.DocumentTitles
+import com.lumen.app.domain.model.ScorerVariant
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
 import com.lumen.app.domain.model.SortOrder
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.withContext
 
 @Singleton
 class SearchRepository @Inject constructor(
     private val pageTextDao: PageTextDao,
     private val documentDao: DocumentDao,
     private val bookmarkDao: BookmarkDao,
+    @ComputeDispatcher private val computeDispatcher: CoroutineDispatcher,
 ) {
     data class Output(val results: List<SearchResult>, val isTruncated: Boolean)
 
     /**
      * Content search runs against the page-level FTS index: one result row per
      * matching PAGE, with every query token somewhere on that page (line breaks
-     * don't matter). Relevance is computed from FTS4 matchinfo — total token hits
-     * on the page — plus a boost when the filename also contains query tokens.
+     * don't matter). Relevance is computed from FTS4 matchinfo (SearchRanking —
+     * BM25 or the legacy hit count, per [variant]) plus a boost when the
+     * filename also contains query tokens.
+     *
+     * The whole body runs on the compute dispatcher: blob parsing, scoring,
+     * sorting, and snippet building are CPU work; Room only takes the SQL
+     * itself off-main.
      */
+    // @spec SEARCH-RANK-008
     suspend fun search(
         rawQuery: String,
         sanitizedQuery: String,
         filters: SearchFilters = SearchFilters(),
-    ): Output {
+        variant: ScorerVariant = ScorerVariant.DEFAULT,
+    ): Output = withContext(computeDispatcher) {
         // Folder filter is expressed as tree *document IDs*; documents store full
         // tree URI strings. Resolve the selected IDs to the matching URI strings so
         // the filter can run inside the SQL, before the row cap.
@@ -48,7 +58,7 @@ class SearchRepository @Inject constructor(
         } else {
             emptyList()
         }
-        if (filterByFolder && selectedTreeUris.isEmpty()) return Output(emptyList(), false)
+        if (filterByFolder && selectedTreeUris.isEmpty()) return@withContext Output(emptyList(), false)
 
         val minIndexedAt = filters.indexedWithin.cutoffMillis()
 
@@ -115,20 +125,31 @@ class SearchRepository @Inject constructor(
         }
 
         // matchinfo is parsed once per row and reused for both the relevance score
-        // and the per-result hitCount. A quoted phrase is ONE matchinfo phrase, so
-        // it counts once per adjacent occurrence, never once per word.
-        // @spec SEARCH-CNT-002
-        val rowsWithHits = candidates.map { it to matchInfoTotalHits(it.matchInfo) }
+        // and the per-result hitCount — badge and ranking can never disagree.
+        // A quoted phrase is ONE matchinfo phrase, so it counts once per adjacent
+        // occurrence, never once per word.
+        // @spec SEARCH-CNT-002, SEARCH-RANK-002
+        val rowsWithStats = candidates.map { it to SearchRanking.parse(it.matchInfo) }
+        val rowsWithHits = rowsWithStats.map { (row, stats) -> row to (stats?.totalHits ?: 0) }
 
+        // @spec SEARCH-RANK-001, SEARCH-RANK-003
         val contentSorted = when (filters.sortOrder) {
-            SortOrder.RELEVANCE -> rowsWithHits
-                .map { (row, hits) -> Triple(row, hits, relevanceScore(row, hits, queryPhrases)) }
-                .sortedWith(
-                    compareByDescending<Triple<PageSearchRow, Int, Int>> { it.third }
-                        .thenBy { it.first.filename.lowercase() }
-                        .thenBy { it.first.pageNumber }
-                )
-                .map { it.first to it.second }
+            SortOrder.RELEVANCE -> {
+                val order = SearchRanking.orderComparator()
+                rowsWithStats
+                    .map { (row, stats) ->
+                        val rawHits = stats?.totalHits ?: 0
+                        val ranked = RankedRow(
+                            score = SearchRanking.score(stats, nameMatchingPhrases(row, queryPhrases), variant),
+                            rawHits = rawHits,
+                            filename = row.filename,
+                            pageNumber = row.pageNumber,
+                        )
+                        Triple(row, rawHits, ranked)
+                    }
+                    .sortedWith(compareBy(order) { it.third })
+                    .map { it.first to it.second }
+            }
             SortOrder.FILENAME -> rowsWithHits
                 .sortedWith(compareBy({ it.first.filename.lowercase() }, { it.first.pageNumber }))
             SortOrder.MOST_RECENT -> rowsWithHits
@@ -220,7 +241,7 @@ class SearchRepository @Inject constructor(
 
         val truncated = contentTruncated || combined.size > RESULT_LIMIT
         val results = buildSnippets(combined.take(RESULT_LIMIT), rawQuery)
-        return Output(results, truncated)
+        return@withContext Output(results, truncated)
     }
 
     /**
@@ -253,15 +274,13 @@ class SearchRepository @Inject constructor(
     suspend fun searchPagesInDocument(sanitizedQuery: String, docUri: String): List<Int> =
         pageTextDao.searchPagesInDocument(sanitizedQuery, docUri)
 
-    /** Precomputed matchinfo hits on the page + a boost per normalized phrase
-     *  that also appears in the document's name (basename or custom title). */
-    private fun relevanceScore(row: PageSearchRow, hits: Int, queryPhrases: List<List<String>>): Int {
-        var score = hits
-        if (queryPhrases.isNotEmpty()) {
-            val targets = nameMatchTargets(row.filename, row.customTitle)
-            score += queryPhrases.count { phrase -> targets.any { nameContains(it, phrase) } } * FILENAME_TOKEN_BOOST
-        }
-        return score
+    /** How many query phrases also appear in the document's name (basename or
+     *  custom title) — the input to SearchRanking's name boost. */
+    // @spec SEARCH-RANK-006
+    private fun nameMatchingPhrases(row: PageSearchRow, queryPhrases: List<List<String>>): Int {
+        if (queryPhrases.isEmpty()) return 0
+        val targets = nameMatchTargets(row.filename, row.customTitle)
+        return queryPhrases.count { phrase -> targets.any { nameContains(it, phrase) } }
     }
 
     /** One phrase against one name target: single tokens keep the lane's
@@ -280,32 +299,6 @@ class SearchRepository @Inject constructor(
             customTitle?.let { TextNormalizer.normalize(it).lowercase() }?.takeIf { it.isNotEmpty() },
         )
 
-    /**
-     * Parse an FTS4 matchinfo blob in 'pcx' format: [p][c] then, per phrase and
-     * column, [hits this row][hits all rows][docs with hits] — 32-bit LE ints.
-     * Returns the sum of this-row hits across all phrases (our only column is 0).
-     * This exact total is what the per-page badge shows — never capped or rounded.
-     */
-    // @spec SEARCH-CNT-001
-    private fun matchInfoTotalHits(blob: ByteArray?): Int {
-        if (blob == null || blob.size < 8) return 0
-        return try {
-            val buf = ByteBuffer.wrap(blob).order(ByteOrder.LITTLE_ENDIAN)
-            val phrases = buf.int
-            val columns = buf.int
-            var total = 0
-            repeat(phrases * columns) {
-                if (buf.remaining() < 12) return total
-                total += buf.int
-                buf.int
-                buf.int
-            }
-            total
-        } catch (_: Exception) {
-            0
-        }
-    }
-
     private companion object {
         /** Final result-list cap. */
         const val RESULT_LIMIT = 200
@@ -313,9 +306,6 @@ class SearchRepository @Inject constructor(
         /** Candidate pool ranked in memory. Larger than the result cap so ranking
          *  has slack; fetched in rowid order (no alphabetical bias). */
         const val CANDIDATE_LIMIT = 600
-
-        /** A query token appearing in the filename outweighs several body hits. */
-        const val FILENAME_TOKEN_BOOST = 20
 
         /** Cap on filename-match rows, applied after token filtering in Kotlin. */
         const val FILENAME_MATCH_LIMIT = 200

@@ -16,8 +16,10 @@ import com.lumen.app.data.fs.ExternalAccessOffers
 import com.lumen.app.data.fs.SafRepository
 import com.lumen.app.data.repository.SearchRepository
 import com.lumen.app.di.ApplicationScope
+import com.lumen.app.BuildConfig
 import com.lumen.app.domain.model.ExternalOpensGate
 import com.lumen.app.domain.model.PendingSearch
+import com.lumen.app.domain.model.ScorerVariant
 import com.lumen.app.domain.model.RecentDocument
 import com.lumen.app.domain.model.SearchFilters
 import com.lumen.app.domain.model.SearchResult
@@ -41,6 +43,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
@@ -302,21 +305,30 @@ class SearchViewModel @Inject constructor(
         // debounce window (the duplicate emission was suppressed, so nothing ever
         // reset isSearching). No distinctUntilChanged: re-running an identical FTS
         // query is cheap and guarantees the searching flag always resolves.
+        // Debug builds may switch the ranking scorer via Settings; release
+        // builds always rank with the production default.
+        // @spec SEARCH-RANK-007
+        val scorerVariant = if (BuildConfig.DEBUG) {
+            safRepository.debugScorerVariant.map { ScorerVariant.fromPref(it) }
+        } else {
+            flowOf(ScorerVariant.DEFAULT)
+        }
+
         @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
-        combine(query, filters) { q, f -> q.trim() to f }
-            .onEach { (q, _) ->
+        combine(query, filters, scorerVariant) { q, f, v -> Triple(q.trim(), f, v) }
+            .onEach { (q, _, _) ->
                 _isSearching.value = q.length >= 2
                 // Editing the query dismisses a previous failure immediately —
                 // showing "Search failed" over a query being corrected is noise.
                 _searchFailed.value = false
             }
             .debounce(200)
-            .mapLatest { (q, f) ->
+            .mapLatest { (q, f, v) ->
                 if (q.length < 2) {
                     SearchOutcome.Idle
                 } else {
                     try {
-                        SearchOutcome.Success(searchUseCase(q, f))
+                        SearchOutcome.Success(searchUseCase(q, f, v))
                     } catch (e: Exception) {
                         if (e is CancellationException) throw e
                         SearchOutcome.Error

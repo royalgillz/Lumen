@@ -4,6 +4,7 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,6 +20,14 @@ import javax.inject.Singleton
 @Retention(AnnotationRetention.BINARY)
 annotation class ApplicationScope
 
+/**
+ * CPU-bound work dispatcher — search ranking, snippet building. Injected so
+ * tests can substitute a recording dispatcher.
+ */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class ComputeDispatcher
+
 @Module
 @InstallIn(SingletonComponent::class)
 object CoroutinesModule {
@@ -28,4 +37,8 @@ object CoroutinesModule {
     @ApplicationScope
     fun provideApplicationScope(): CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    @Provides
+    @ComputeDispatcher
+    fun provideComputeDispatcher(): CoroutineDispatcher = Dispatchers.Default
 }

@@ -7,6 +7,8 @@
 -keep class com.lumen.app.data.db.entity.** { *; }
 -keep class com.lumen.app.data.db.dao.PageSearchRow { *; }
 -keep class com.lumen.app.data.db.dao.FilenameSearchRow { *; }
+-keep class com.lumen.app.data.db.dao.NoteSearchRow { *; }
+-keep class com.lumen.app.data.db.dao.PageTextRow { *; }
 
 # ── Hilt ──────────────────────────────────────────────────────────────────────
 -keep class dagger.hilt.** { *; }

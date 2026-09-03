@@ -20,7 +20,7 @@ interface PageTextDao {
     // toward alphabetically-early documents.
     @Query("""
         SELECT t.pageId AS pageId, p.pageNumber, p.isOcr,
-               matchinfo(page_text_fts, 'pcx') AS matchInfo,
+               matchinfo(page_text_fts, 'pcnalx') AS matchInfo,
                d.id AS docId, d.uri, d.filename, d.treeUri, d.indexedAt,
                d.derivedTitle, dt.title AS customTitle
         FROM page_text_fts

@@ -30,6 +30,7 @@ class SafRepository @Inject constructor(
         private val KEY_VIEWER_SCROLL_HORIZONTAL = booleanPreferencesKey("viewer_scroll_horizontal")
         private val KEY_FILTER_OCR_ONLY = booleanPreferencesKey("filter_ocr_only")
         private val KEY_FILTER_SORT_ORDER = stringPreferencesKey("filter_sort_order")
+        private val KEY_DEBUG_SCORER_VARIANT = stringPreferencesKey("debug_scorer_variant")
         private val KEY_LIBRARY_SORT_ORDER = stringPreferencesKey("library_sort_order")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         private val KEY_NAV_LAYOUT = stringPreferencesKey("nav_layout")
@@ -233,6 +234,18 @@ class SafRepository @Inject constructor(
 
     val savedFilterOcrOnly: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_FILTER_OCR_ONLY] ?: false
+    }
+
+    /** Debug-build scorer selection, stored as the ScorerVariant enum name.
+     *  Release builds never read this — they always rank with the production
+     *  default. */
+    // @spec SEARCH-RANK-007
+    val debugScorerVariant: Flow<String?> = dataStore.data.map { prefs ->
+        prefs[KEY_DEBUG_SCORER_VARIANT]
+    }
+
+    suspend fun saveDebugScorerVariant(name: String) {
+        dataStore.edit { it[KEY_DEBUG_SCORER_VARIANT] = name }
     }
 
     val savedFilterSortOrder: Flow<String> = dataStore.data.map { prefs ->
