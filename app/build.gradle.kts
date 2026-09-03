@@ -45,6 +45,12 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Native debug symbols ride inside the bundle so Play Console can
+            // symbolicate MuPDF/Tesseract crash stacks (OS-level reports Google
+            // already receives — nothing is added to the app itself).
+            ndk {
+                debugSymbolLevel = "SYMBOL_TABLE"
+            }
             signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
