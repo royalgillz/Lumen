@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -34,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.lumen.app.eval.EvalExport
 import com.lumen.app.eval.EvalScorer
 import java.util.Locale
 
@@ -83,7 +85,7 @@ fun EvalScreen(
                 OutlinedButton(onClick = { picker.launch(arrayOf("application/json", "*/*")) }) {
                     Text(if (state.evalSetUri == null) "Pick eval set" else "Change file")
                 }
-                Spacer(Modifier.padding(horizontal = 6.dp))
+                Spacer(Modifier.width(12.dp))
                 Button(onClick = { viewModel.run() }, enabled = state.evalSetUri != null && !state.running) {
                     Text("Run")
                 }
@@ -121,7 +123,7 @@ fun EvalScreen(
                 // @spec SEARCH-EVAL-008
                 state.stamp?.let { stamp ->
                     Text(
-                        "Corpus: ${stamp.indexedCount} docs indexed",
+                        "Corpus: " + EvalExport.stampLine(stamp.indexedCount, stamp.newestIndexedAt),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -139,9 +141,7 @@ fun EvalScreen(
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                 )
-                for (row in state.rows.sortedWith(
-                    compareBy({ it.variant.name }, { it.tag != EvalScorer.OVERALL }, { it.tag })
-                )) {
+                for (row in state.rows.sortedWith(EvalExport.sortOrder())) {
                     Text(
                         "${row.variant.name} · ${row.tag} · ${row.resolved} · ${row.hitsAt10} · " +
                             "${row.hitsAt20} · " + "%.3f".format(Locale.US, row.mrr) +

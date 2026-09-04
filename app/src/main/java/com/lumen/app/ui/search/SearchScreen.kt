@@ -309,10 +309,13 @@ fun SearchScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                // On a primaryContainer surface the bar must be onPrimaryContainer —
+                // primary IS the container color in both schemes, so a primary-colored
+                // bar renders invisible (green on green). Same pairing the label uses.
                 LinearProgressIndicator(
                     modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    trackColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.25f),
                 )
                 Text("Indexing…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
             }

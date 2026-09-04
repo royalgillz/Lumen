@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
@@ -308,8 +309,15 @@ class SearchViewModel @Inject constructor(
         // Debug builds may switch the ranking scorer via Settings; release
         // builds always rank with the production default.
         // @spec SEARCH-RANK-007
+        // distinctUntilChanged is load-bearing: DataStore's data flow emits on
+        // EVERY preferences write (history saves, filter persistence), and an
+        // undeduped echo here would re-fire the whole search pipeline on each
+        // of them. (The pipeline's own no-distinctUntilChanged rule below is
+        // about the combined query tuple, not this source.)
         val scorerVariant = if (BuildConfig.DEBUG) {
-            safRepository.debugScorerVariant.map { ScorerVariant.fromPref(it) }
+            safRepository.debugScorerVariant
+                .map { ScorerVariant.fromPref(it) }
+                .distinctUntilChanged()
         } else {
             flowOf(ScorerVariant.DEFAULT)
         }
